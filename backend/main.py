@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi import FastAPI, UploadFile, File, Query, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -6,7 +6,7 @@ import numpy as np
 import uuid
 import os
 
-from db import qdrant, cursor, QDRANT_COLLECTION
+from db import qdrant, cursor, conn, QDRANT_COLLECTION
 from face import get_embedding
 
 # ✅ Create app ONLY ONCE
@@ -158,7 +158,7 @@ async def search_face(
 
     for r in results:
         # similarity threshold (important)
-        if r.score < 0.75:
+        if r.score < 0.60:
             continue
 
         pid = r.payload.get("FinalPersonId")
@@ -226,24 +226,113 @@ def get_case_by_id(case_id: str):
         },
     }
 
+@app.post("/report/missing")
+async def report_missing(
+    name: str = Form(...),
+    gender: str = Form(...),
+    birth_year: int = Form(...),
+    state: str = Form(...),
+    district: str = Form(...),
+    police_station: str = Form(...),
+    photo: UploadFile = File(...)
+):
+    try:
+        final_person_id = f"FP_{uuid.uuid4().hex[:12]}"
+
+        filename = f"{final_person_id}.jpg"
+        image_path = os.path.join(IMAGES_DIR, filename)
+
+        with open(image_path, "wb") as f:
+            f.write(await photo.read())
+
+        # Proper image handling (avoid file-lock issues)
+        with Image.open(image_path) as im:
+            img = im.convert("RGB")
+
+        embedding = get_embedding(img)
+        if embedding is None:
+            raise HTTPException(status_code=400, detail="No face detected in uploaded image")
+
+        # Ensure embedding is a plain Python list of floats
+        vector = embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+
+        qdrant.upsert(
+            collection_name=QDRANT_COLLECTION,
+            points=[
+                {
+                    "id": uuid.uuid4().int >> 64,
+                    "vector": vector,
+                    "payload": {
+                        "FinalPersonId": final_person_id
+                    },
+                }
+            ],
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO persons (
+                final_person_id,
+                name,
+                sex,
+                birth_year,
+                state,
+                district,
+                police_station,
+                tracing_status,
+                image_file
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                final_person_id,
+                name,
+                gender.upper(),
+                birth_year,
+                state.upper(),
+                district.upper(),
+                police_station.upper(),
+                "Untraced",
+                filename,
+            ),
+        )
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "case_id": final_person_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+        
 from fastapi import Query
 
 @app.get("/cases")
 def get_cases(
     page: int = 1,
     limit: int = 24,
+    search: str | None = None,
     state: str | None = None,
     status: str | None = None,
     gender: str | None = None,
 ):
     offset = (page - 1) * limit
-
     conditions = []
     values = []
 
+    if search:
+        conditions.append("LOWER(name) LIKE %s")
+        values.append(f"%{search.lower()}%")
+
     if state:
         conditions.append("state = %s")
-        values.append(state)
+        values.append(state.upper())
 
     if status:
         conditions.append("tracing_status = %s")
@@ -251,7 +340,7 @@ def get_cases(
 
     if gender:
         conditions.append("sex = %s")
-        values.append(gender)
+        values.append(gender.upper())
 
     where_clause = ""
     if conditions:
