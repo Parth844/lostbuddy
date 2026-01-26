@@ -1,0 +1,20 @@
+# Node
+node_modules/
+dist/
+.vite/
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+
+# Env
+.env
+
+# Docker volumes (DO NOT COMMIT DATA)
+pgdata/
+qdrant_storage/
+final_images/
+
+# OS
+.DS_Store
