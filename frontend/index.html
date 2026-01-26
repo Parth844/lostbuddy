@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>LostBuddy | Face Search</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <header>
+    <h1>LostBuddy</h1>
+    <p>Face Recognition Search System</p>
+  </header>
+
+  <main class="container">
+
+    <!-- Upload Section -->
+    <section class="upload-section">
+      <div class="upload-card">
+        <h2>Upload Face Image</h2>
+
+        <div class="file-input">
+          <input type="file" id="imageInput" accept="image/*" />
+        </div>
+
+        <img id="preview" class="preview hidden" />
+
+        <button id="searchBtn">Search Face</button>
+
+        <div id="loader" class="loader hidden">
+          Analyzing face & searching database...
+        </div>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section class="results-section">
+      <h2>Search Results</h2>
+      <div id="results" class="results"></div>
+    </section>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# Core ML / Vision
+facenet-pytorch
+torch
+opencv-python
+pandas
+numpy
+Pillow
+
+# FastAPI + Server
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Database
+sqlalchemy
+psycopg2-binary
+alembic
+
+# Environment variables
+python-dotenv
+
+# Security / Auth
+passlib[bcrypt]
+python-jose[cryptography]
+email-validator
+
+# Optional: For async DB if needed
+# sqlalchemy[asyncio]
+onnxruntime
+onnxruntime==1.17.3

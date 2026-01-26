@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+insightface
+qdrant-client==1.7.3
+psycopg2-binary
+pillow
+numpy<2
+onnxruntime==1.17.3
