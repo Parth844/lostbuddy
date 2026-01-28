@@ -3,8 +3,8 @@ import csv
 import uuid
 import numpy as np
 from PIL import Image
-from insightface.app import FaceAnalysis
 from qdrant_client import QdrantClient
+from insightface.app import FaceAnalysis
 from qdrant_client.models import PointStruct
 import psycopg2
 from tqdm import tqdm
