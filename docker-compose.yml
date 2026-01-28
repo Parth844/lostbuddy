@@ -1,4 +1,3 @@
-version: "3.9"
 
 services:
   backend:
@@ -20,6 +19,7 @@ services:
 
   postgres:
     image: postgres:15
+    platform: linux/amd64
     container_name: final_buddy_postgres
     environment:
       POSTGRES_DB: faces_db
