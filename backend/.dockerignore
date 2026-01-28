@@ -1,14 +1,33 @@
-.venv
-node_modules
-datasets_csv
-final_images
-qdrant_data
-qdrant_storage
-pgdata
-*.csv
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Node / frontend junk
+node_modules/
+
+# ML / Data (VERY IMPORTANT)
 *.onnx
 *.pt
-*.zip
-*.tar
+*.pth
+*.npz
+*.npy
+*.csv
+datasets/
+final_images/
+Final_image/
+qdrant_data/
+qdrant_storage/
+pgdata/
+dump/
+
+# Git / env
 .git
 .env
+.env.*
+
+# OS
+.DS_Store
