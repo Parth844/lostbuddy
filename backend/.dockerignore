@@ -1,0 +1,12 @@
+venv/
+node_modules/
+pgdata/
+qdrant_data/
+qdrant_storage/
+datasets_csv/
+dump/
+final_images/
+*.csv
+*.zip
+.git
+.env
