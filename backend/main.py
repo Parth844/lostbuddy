@@ -1,13 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, Query, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
-import numpy as np
 import uuid
 import os
 
 from db import qdrant, cursor, conn, QDRANT_COLLECTION
-from face import get_embedding
+from services.face_engine_client import match_face
 
 # ✅ Create app ONLY ONCE
 app = FastAPI(title="LostBuddy Face Search API")
@@ -44,31 +42,14 @@ def get_persons_alias():
     return get_cases()
 
 # -------------------------
-# Utils
-# -------------------------
-def load_image(file: UploadFile) -> Image.Image:
-    try:
-        img = Image.open(file.file).convert("RGB")
-        return img
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid image file")
-    finally:
-        file.file.close()
-
-
-# -------------------------
 # POST /upload-photo
 # (validate face only)
 # -------------------------
 @app.post("/upload-photo")
 async def upload_photo(file: UploadFile = File(...)):
-    img = load_image(file)
-    emb = get_embedding(img)
-
-    if emb is None:
-        return {"success": False, "message": "No face detected"}
-
-    return {"success": True, "message": "Face detected"}
+    image_bytes = await file.read()
+    result = match_face(image_bytes)
+    return result
 
 
 # -------------------------
@@ -138,56 +119,10 @@ async def register_face(
 # POST /search
 # -------------------------
 @app.post("/search")
-async def search_face(
-    file: UploadFile = File(...),
-    top: int = Query(5)
-):
-    img = load_image(file)
-    emb = get_embedding(img)
-
-    if emb is None:
-        return {"success": True, "matches": [], "message": "No face detected"}
-
-    results = qdrant.search(
-        collection_name=QDRANT_COLLECTION,
-        query_vector=emb.tolist(),
-        limit=top
-    )
-
-    matches = []
-
-    for r in results:
-        # similarity threshold (important)
-        if r.score < 0.60:
-            continue
-
-        pid = r.payload.get("FinalPersonId")
-
-        cursor.execute(
-            "SELECT * FROM persons WHERE final_person_id = %s",
-            (pid,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            continue
-
-        matches.append({
-            "FinalPersonId": pid,
-            "score": float(r.score),
-            "name": row[1],
-            "sex": row[2],
-            "birth_year": row[3],
-            "state": row[4],
-            "district": row[5],
-            "police_station": row[6],
-            "tracing_status": row[7],
-            "image_file": row[8],
-        })
-
-    return {
-        "success": True,
-        "matches": matches
-    }
+async def search_face(file: UploadFile = File(...)):
+    image_bytes = await file.read()
+    result = match_face(image_bytes)
+    return result
 
 
 # -------------------------

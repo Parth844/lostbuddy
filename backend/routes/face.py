@@ -1,12 +1,10 @@
-import requests
-import os
+from fastapi import APIRouter, UploadFile, File
+from services.face_engine_client import match_face
 
-FACE_ENGINE_URL = os.getenv("FACE_ENGINE_URL")
+router = APIRouter(prefix="/face", tags=["Face"])
 
-def match_face(image_bytes):
-    response = requests.post(
-        f"{FACE_ENGINE_URL}/match",
-        files={"file": image_bytes}
-    )
-    response.raise_for_status()
-    return response.json()
+@router.post("/search")
+async def search_face(file: UploadFile = File(...)):
+    image_bytes = await file.read()
+    result = match_face(image_bytes)
+    return result
