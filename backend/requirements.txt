@@ -7,3 +7,6 @@ psycopg2-binary
 pillow
 numpy<2
 onnxruntime==1.17.3
+passlib[bcrypt]
+python-jose
+bcrypt==4.0.1

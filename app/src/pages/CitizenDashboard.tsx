@@ -11,82 +11,71 @@ import Footer from '@/components/shared/Footer';
 import CaseCard from '@/components/shared/CaseCard';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { getCases, type Case } from '@/services/api';
+import { getCases, getDashboardStats, getNotifications, markNotificationRead, type Case, type DashboardStats, type Notification } from '@/services/api';
 
-interface Notification {
-  id: string;
-  title: string;
-  message: string;
-  date: string;
-  read: boolean;
-  type: 'update' | 'match' | 'alert';
-}
+// interface Notification moved to api.ts
 
 export default function CitizenDashboard() {
   const [activeTab, setActiveTab] = useState('cases');
   const [myCases, setMyCases] = useState<Case[]>([]);
+  const [casesTotal, setCasesTotal] = useState(0);
+  const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    fetchCases();
+    fetchData();
   }, []);
 
-  const fetchCases = async () => {
+  const fetchData = async () => {
     try {
       setIsLoading(true);
-      const { cases } = await getCases();
-      setMyCases(cases);
+      const [casesData, statsData] = await Promise.all([
+        getCases({ mine: true }),
+        getDashboardStats()
+      ]);
+
+      setMyCases(casesData.cases);
+      setCasesTotal(casesData.total);
+      setDashboardStats(statsData);
+
+      const notifs = await getNotifications();
+      setNotifications(notifs);
     } catch (error) {
-      toast.error('Failed to load cases');
+      toast.error('Failed to load dashboard data');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const notifications: Notification[] = [
-    {
-      id: '1',
-      title: 'Case Update',
-      message: 'Your case is now under active review.',
-      date: '2 hours ago',
-      read: false,
-      type: 'update',
-    },
-    {
-      id: '2',
-      title: 'Potential Match Found',
-      message: 'A potential match has been identified for one of your cases.',
-      date: '1 day ago',
-      read: false,
-      type: 'match',
-    },
-    {
-      id: '3',
-      title: 'Verification Complete',
-      message: 'Case information has been verified.',
-      date: '3 days ago',
-      read: true,
-      type: 'update',
-    },
-  ];
+  // notifications state is now managed above
+
+  const handleMarkRead = async (id: string) => {
+    try {
+      await markNotificationRead(id);
+      setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const stats = [
     {
-      label: 'Active Cases',
-      value: myCases.filter(c => c.status !== 'closed').length,
+      label: 'Total Cases',
+      value: dashboardStats?.total_cases || 0,
       icon: FileText,
       color: 'bg-blue-500'
     },
     {
-      label: 'Matches Found',
-      value: myCases.filter(c => c.status === 'matched').length,
+      label: 'Traced',
+      value: dashboardStats?.traced || 0,
       icon: CheckCircle,
       color: 'bg-green-500'
     },
     {
-      label: 'Under Review',
-      value: myCases.filter(c => c.status === 'under-review').length,
-      icon: Clock,
+      label: 'Untraced',
+      value: dashboardStats?.untraced || 0,
+      icon: AlertCircle,
       color: 'bg-amber-500'
     },
   ];
@@ -215,8 +204,10 @@ export default function CitizenDashboard() {
                 notifications.map((notification) => (
                   <div
                     key={notification.id}
-                    className={`bg-white rounded-xl border p-4 flex items-start gap-4 ${notification.read ? 'border-gray-100' : 'border-[#1E6BFF]/30 bg-[#1E6BFF]/5'
+                    key={notification.id}
+                    className={`bg-white rounded-xl border p-4 flex items-start gap-4 cursor-pointer transition-colors ${notification.read ? 'border-gray-100' : 'border-[#1E6BFF]/30 bg-[#1E6BFF]/5'
                       }`}
+                    onClick={() => !notification.read && handleMarkRead(notification.id)}
                   >
                     <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
                       {getNotificationIcon(notification.type)}

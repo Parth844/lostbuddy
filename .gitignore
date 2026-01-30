@@ -21,3 +21,4 @@ final_images/
 
 # OS
 .DS_Store
+backend/user_uploads/

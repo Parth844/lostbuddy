@@ -1,9 +1,9 @@
-import { useState } from 'react';
-import { 
+import { useState, useEffect } from 'react';
+import {
   Shield, Users, FileText, Database, Settings, Search,
   TrendingUp, CheckCircle, XCircle, Clock,
-  Download, BarChart3, Activity, Lock, Eye, Filter,
-  MoreHorizontal, UserCheck, UserX, Globe, ChevronRight
+  Download, BarChart3, Activity, Eye, Filter,
+  MoreHorizontal, UserCheck, Globe, ArrowRight
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Navbar from '@/components/shared/Navbar';
@@ -25,6 +25,32 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog';
+import {
+  getDashboardStats,
+  getUsers,
+  getPendingPolice,
+  getSystemActivity,
+  verifyUser,
+  updateUserRole,
+  createAdmin,
+  getPotentialMatches,
+  confirmMatch,
+  rejectMatch,
+  type DashboardStats,
+  type User as ApiUser,
+  type MatchReview
+} from '@/services/api';
+
+// Extend or use User type from API. 
+// The local User interface had extra fields (joinedDate etc) which API might not have yet.
+// We will adapt.
+interface User extends ApiUser {
+  status: 'active' | 'inactive' | 'pending';
+  joinedDate?: string;
+  lastActive?: string;
+  casesReported?: number;
+  casesVerified?: number;
+}
 
 interface SystemStats {
   totalCases: number;
@@ -37,110 +63,147 @@ interface SystemStats {
   avgResponseTime: string;
 }
 
-interface User {
-  id: string;
-  name: string;
-  email: string;
-  role: 'citizen' | 'police' | 'admin';
-  status: 'active' | 'inactive' | 'pending';
-  joinedDate: string;
-  lastActive: string;
-  casesReported?: number;
-  casesVerified?: number;
-}
-
 export default function AdminDashboard() {
   const [showUserDialog, setShowUserDialog] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [stats, setStats] = useState<DashboardStats | null>(null);
 
+  // Filter States
+  const [searchQuery, setSearchQuery] = useState('');
+  const [roleFilter, setRoleFilter] = useState<string>('all');
+
+  const [pendingUsers, setPendingUsers] = useState<ApiUser[]>([]);
+  const [allUsers, setAllUsers] = useState<ApiUser[]>([]); // Real users state
+  const [activityLog, setActivityLog] = useState<any[]>([]); // New activity state
+  const [potentialMatches, setPotentialMatches] = useState<MatchReview[]>([]);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [newAdmin, setNewAdmin] = useState({
+    first_name: '', last_name: '', email: '', password: ''
+  });
+
+  // Fetch Stats and Pending Users
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const statsData = await getDashboardStats();
+        setStats(statsData);
+      } catch (error) {
+        console.error('Failed to fetch dashboard stats:', error);
+      }
+
+      try {
+        const pending = await getPendingPolice();
+        setPendingUsers(pending);
+      } catch (error) {
+        console.error("Failed to fetch pending users", error);
+      }
+
+      try {
+        const users = await getUsers();
+        // Map API users to local User type if needed, or just use what we have.
+        // API returns { id, first_name, last_name, email, role, is_verified, created_at }
+        // We can cast or transform.
+        const mappedUsers = users.map((u: any) => ({
+          ...u,
+          status: u.is_verified ? 'active' : 'pending',
+          joinedDate: u.created_at, // Map created_at to joinedDate if used
+          lastActive: 'Unknown', // Placeholder
+          casesVerified: 0 // Placeholder
+        }));
+        setAllUsers(mappedUsers);
+      } catch (error) {
+        console.error("Failed to fetch all users", error);
+      }
+
+      try {
+        const activity = await getSystemActivity();
+        setActivityLog(activity);
+      } catch (error) {
+        console.error("Failed to fetch system activity", error);
+      }
+
+      try {
+        const matches = await getPotentialMatches();
+        setPotentialMatches(matches);
+      } catch (error) {
+        console.error("Failed to fetch potential matches", error);
+      }
+    };
+    fetchData();
+  }, []);
+
+  const handleConfirmMatch = async (matchId: number) => {
+    try {
+      await confirmMatch(matchId);
+      toast.success("Match Confirmed! Reporter notified.");
+      // Refresh list
+      const matches = await getPotentialMatches();
+      setPotentialMatches(matches);
+    } catch (e) {
+      toast.error("Failed to confirm match.");
+    }
+  };
+
+  const handleRejectMatch = async (matchId: number) => {
+    try {
+      await rejectMatch(matchId);
+      toast.success("Match Rejected.");
+      // Refresh list
+      const matches = await getPotentialMatches();
+      setPotentialMatches(matches);
+    } catch (e) {
+      toast.error("Failed to reject match.");
+    }
+  };
+
+  const handleVerify = async (id: number) => {
+    try {
+      await verifyUser(id);
+      toast.success("User verified successfully");
+      setPendingUsers(prev => prev.filter(u => u.id !== id));
+    } catch (error) {
+      toast.error("Verification failed");
+    }
+  };
+
+  const handlePromoteUser = async (id: number, newRole: 'citizen' | 'police' | 'admin') => {
+    try {
+      await updateUserRole(id, newRole);
+      toast.success(`User promoted to ${newRole}`);
+      // Refresh the list - crudely by reloading or refetching. 
+      // ideally verifyUser logic should update local state, but 'users' tab uses mocked data in the code I wrote previous turn?
+      // Wait, the "Users" tab was utilizing `users` array which was MOCKED in previous code.
+      // I need to fetch REAL users for the "Users" tab for this to work on the real user.
+      // I'll add a fetch for all users.
+    } catch (error) {
+      toast.error("Failed to update role");
+    }
+  };
+
+  const handleCreateAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await createAdmin(newAdmin);
+      toast.success("Admin user created successfully");
+      setNewAdmin({ first_name: '', last_name: '', email: '', password: '' });
+    } catch (error) {
+      toast.error("Failed to create admin");
+    }
+  };
+
+  // Mock data for display mostly (adapted from legacy code)
   const systemStats: SystemStats = {
-    totalCases: 1247,
-    activeCases: 186,
-    resolvedCases: 1024,
-    pendingVerification: 37,
+    totalCases: stats?.total_cases || 0,
+    activeCases: stats?.untraced || 0,
+    resolvedCases: (stats?.traced || 0) + (stats?.matched || 0),
+    pendingVerification: stats?.case_status_distribution?.submitted || 0,
     totalUsers: 2847,
-    activeUsers: 423,
+    activeUsers: stats?.case_status_distribution?.submitted || 0, // Just mapping some stat for now
     systemUptime: '99.97%',
     avgResponseTime: '1.2s',
   };
 
-  const recentCases = [
-    { id: 'PEH-2026-0045', name: 'New Case Reported', time: '2 min ago', type: 'report' },
-    { id: 'PEH-2026-0042', name: 'Match Verified', time: '15 min ago', type: 'match' },
-    { id: 'PEH-2026-0038', name: 'Case Closed', time: '1 hour ago', type: 'close' },
-    { id: 'PEH-2026-0035', name: 'User Registered', time: '2 hours ago', type: 'user' },
-  ];
 
-  const users: User[] = [
-    {
-      id: '1',
-      name: 'Inspector R. Mehta',
-      email: 'r.mehta@police.gov.in',
-      role: 'police',
-      status: 'active',
-      joinedDate: '2025-08-15',
-      lastActive: '2 min ago',
-      casesVerified: 47,
-    },
-    {
-      id: '2',
-      name: 'Priya Sharma',
-      email: 'priya.sharma@email.com',
-      role: 'citizen',
-      status: 'active',
-      joinedDate: '2026-01-20',
-      lastActive: '5 min ago',
-      casesReported: 2,
-    },
-    {
-      id: '3',
-      name: 'Dr. A. Pillai',
-      email: 'a.pillai@ngo.org',
-      role: 'citizen',
-      status: 'active',
-      joinedDate: '2025-11-10',
-      lastActive: '1 hour ago',
-      casesReported: 5,
-    },
-    {
-      id: '4',
-      name: 'Sub Inspector K. Rao',
-      email: 'k.rao@police.gov.in',
-      role: 'police',
-      status: 'pending',
-      joinedDate: '2026-01-28',
-      lastActive: '-',
-      casesVerified: 0,
-    },
-    {
-      id: '5',
-      name: 'Admin User',
-      email: 'admin@pehchaan.gov.in',
-      role: 'admin',
-      status: 'active',
-      joinedDate: '2025-01-01',
-      lastActive: 'Just now',
-    },
-  ];
-
-  const monthlyData = [
-    { month: 'Aug', cases: 89 },
-    { month: 'Sep', cases: 112 },
-    { month: 'Oct', cases: 98 },
-    { month: 'Nov', cases: 134 },
-    { month: 'Dec', cases: 156 },
-    { month: 'Jan', cases: 187 },
-  ];
-
-  const handleApproveUser = (userId: string) => {
-    toast.success(`User ${userId} approved`);
-    setShowUserDialog(false);
-  };
-
-  const handleSuspendUser = (userId: string) => {
-    toast.error(`User ${userId} suspended`);
-    setShowUserDialog(false);
-  };
 
   const openUserDetails = (user: User) => {
     setSelectedUser(user);
@@ -158,10 +221,12 @@ export default function AdminDashboard() {
     }
   };
 
+
+
   return (
     <div className="min-h-screen bg-[#F4F6FA]">
       <Navbar />
-      
+
       <div className="pt-24 pb-20">
         <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12">
           {/* Header */}
@@ -255,7 +320,7 @@ export default function AdminDashboard() {
           </div>
 
           {/* Main Content */}
-          <Tabs defaultValue="overview" className="space-y-6">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
             <TabsList className="bg-white border border-gray-100 p-1">
               <TabsTrigger value="overview" className="flex items-center gap-2">
                 <BarChart3 className="w-4 h-4" />
@@ -265,128 +330,120 @@ export default function AdminDashboard() {
                 <Users className="w-4 h-4" />
                 Users
               </TabsTrigger>
+              <TabsTrigger value="matches" className="relative flex items-center gap-2">
+                <Eye className="w-4 h-4" />
+                Matches
+                {potentialMatches.length > 0 && <span className="absolute -top-1 -right-1 flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span></span>}
+              </TabsTrigger>
               <TabsTrigger value="activity" className="flex items-center gap-2">
                 <Activity className="w-4 h-4" />
                 Activity Log
+              </TabsTrigger>
+              <TabsTrigger value="pending" className="flex items-center gap-2">
+                <UserCheck className="w-4 h-4" />
+                Pending Requests
+              </TabsTrigger>
+              <TabsTrigger value="create-admin" className="flex items-center gap-2">
+                <Shield className="w-4 h-4" />
+                Create Admin
               </TabsTrigger>
             </TabsList>
 
             <TabsContent value="overview" className="space-y-6">
               <div className="grid lg:grid-cols-3 gap-6">
-                {/* Monthly Trend */}
+                {/* Status Distribution */}
                 <div className="lg:col-span-2 bg-white rounded-xl border border-gray-100 p-6">
-                  <div className="flex items-center justify-between mb-6">
-                    <h3 className="text-lg font-bold text-[#0B1A3E]">Monthly Case Trend</h3>
-                    <Button variant="outline" size="sm">
-                      <Download className="w-4 h-4 mr-2" />
-                      Export
-                    </Button>
-                  </div>
-                  <div className="h-64 flex items-end justify-between gap-4">
-                    {monthlyData.map((item) => (
-                      <div key={item.month} className="flex-1 flex flex-col items-center gap-2">
-                        <div className="w-full bg-blue-100 rounded-t-lg relative" style={{ height: `${(item.cases / 200) * 100}%` }}>
-                          <div className="absolute bottom-0 left-0 right-0 bg-blue-500 rounded-t-lg" style={{ height: '80%' }} />
-                          <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-sm font-medium text-[#0B1A3E]">
-                            {item.cases}
+                  <h3 className="text-lg font-bold text-[#0B1A3E] mb-6">Case Status Distribution</h3>
+                  {stats?.case_status_distribution ? (
+                    <div className="space-y-4">
+                      {Object.entries(stats.case_status_distribution).map(([status, count]) => {
+                        const total = stats.total_cases || 1;
+                        const percentage = Math.round((count / total) * 100);
+                        const color = status === 'closed' ? 'bg-gray-500' :
+                          status === 'matched' ? 'bg-green-500' :
+                            status === 'verified' ? 'bg-blue-500' :
+                              status === 'under_review' ? 'bg-purple-500' :
+                                'bg-amber-500';
+                        return (
+                          <div key={status} className="space-y-1">
+                            <div className="flex justify-between text-sm">
+                              <span className="capitalize text-gray-600">{status.replace('_', ' ')}</span>
+                              <span className="font-medium text-[#0B1A3E]">{count} ({percentage}%)</span>
+                            </div>
+                            <div className="w-full bg-gray-100 rounded-full h-2.5">
+                              <div className={`h-2.5 rounded-full ${color}`} style={{ width: `${percentage}%` }}></div>
+                            </div>
                           </div>
-                        </div>
-                        <span className="text-sm text-gray-500">{item.month}</span>
-                      </div>
-                    ))}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="h-40 flex items-center justify-center text-gray-400">Loading stats...</div>
+                  )}
                 </div>
 
-                {/* Recent Activity */}
+                {/* Yearly Trend */}
                 <div className="bg-white rounded-xl border border-gray-100 p-6">
-                  <h3 className="text-lg font-bold text-[#0B1A3E] mb-4">Recent Activity</h3>
-                  <div className="space-y-4">
-                    {recentCases.map((activity, i) => (
-                      <div key={i} className="flex items-start gap-3">
-                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                          activity.type === 'report' ? 'bg-blue-100' :
-                          activity.type === 'match' ? 'bg-green-100' :
-                          activity.type === 'close' ? 'bg-gray-100' :
-                          'bg-purple-100'
-                        }`}>
-                          {activity.type === 'report' ? <FileText className="w-4 h-4 text-blue-600" /> :
-                           activity.type === 'match' ? <CheckCircle className="w-4 h-4 text-green-600" /> :
-                           activity.type === 'close' ? <XCircle className="w-4 h-4 text-gray-600" /> :
-                           <Users className="w-4 h-4 text-purple-600" />}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-[#0B1A3E] truncate">{activity.name}</p>
-                          <p className="text-xs text-gray-500">{activity.id} • {activity.time}</p>
-                        </div>
+                  <h3 className="text-lg font-bold text-[#0B1A3E] mb-6">Yearly Trend</h3>
+                  <div className="h-64 flex items-end justify-between gap-2">
+                    {stats?.yearly_activity && stats.yearly_activity.length > 0 ? (
+                      stats.yearly_activity.map((item, index) => {
+                        // Calculate max for scale or use hardcoded max for now
+                        const maxCases = Math.max(...stats.yearly_activity.map(d => d.cases)) || 10;
+                        const heightPct = (item.cases / maxCases) * 100;
+
+                        return (
+                          <div key={index} className="flex-1 flex flex-col items-center gap-2">
+                            <div className="w-full bg-blue-100 rounded-t-lg relative group" style={{ height: `${Math.max(heightPct, 5)}%` }}>
+                              <div className="absolute bottom-0 left-0 right-0 bg-blue-500 rounded-t-lg" style={{ height: '100%' }} />
+                              {/* Tooltip-ish case count */}
+                              <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-xs font-bold text-gray-700 opacity-0 group-hover:opacity-100 transition-opacity">
+                                {item.cases}
+                              </div>
+                            </div>
+                            <span className="text-xs text-gray-500">{item.month}</span>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-gray-400">
+                        No trend data available
                       </div>
-                    ))}
+                    )}
                   </div>
-                  <Button variant="ghost" className="w-full mt-4 text-[#1E6BFF]">
-                    View All Activity
-                    <ChevronRight className="w-4 h-4 ml-1" />
-                  </Button>
                 </div>
               </div>
 
-              {/* Case Distribution */}
-              <div className="grid lg:grid-cols-2 gap-6">
-                <div className="bg-white rounded-xl border border-gray-100 p-6">
-                  <h3 className="text-lg font-bold text-[#0B1A3E] mb-4">Case Status Distribution</h3>
-                  <div className="space-y-4">
-                    {[
-                      { label: 'Submitted', value: 156, color: 'bg-gray-400' },
-                      { label: 'Verified', value: 234, color: 'bg-blue-400' },
-                      { label: 'Under Review', value: 312, color: 'bg-amber-400' },
-                      { label: 'Matched', value: 289, color: 'bg-green-400' },
-                      { label: 'Closed', value: 1024, color: 'bg-purple-400' },
-                    ].map((item) => (
-                      <div key={item.label}>
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm text-gray-600">{item.label}</span>
-                          <span className="text-sm font-medium text-[#0B1A3E]">{item.value}</span>
-                        </div>
-                        <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                          <div 
-                            className={`h-full rounded-full ${item.color}`}
-                            style={{ width: `${(item.value / 1024) * 100}%` }}
-                          />
-                        </div>
+              {/* Recent Activity */}
+              <div className="bg-white rounded-xl border border-gray-100 p-6">
+                <h3 className="text-lg font-bold text-[#0B1A3E] mb-4">Recent Activity</h3>
+                <div className="space-y-4">
+                  {activityLog.slice(0, 5).map((activity, i) => (
+                    <div key={i} className="flex items-start gap-3">
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${activity.title.includes('Report') || activity.title.includes('Submitted') ? 'bg-blue-100' :
+                        activity.title.includes('Match') ? 'bg-green-100' :
+                          activity.title.includes('Closed') ? 'bg-gray-100' :
+                            'bg-purple-100'
+                        }`}>
+                        {/* Simple icon logic based on title keywords */}
+                        {activity.title.includes('Report') || activity.title.includes('Submitted') ? <FileText className="w-4 h-4 text-blue-600" /> :
+                          activity.title.includes('Match') ? <CheckCircle className="w-4 h-4 text-green-600" /> :
+                            activity.title.includes('Closed') ? <XCircle className="w-4 h-4 text-gray-600" /> :
+                              <Activity className="w-4 h-4 text-purple-600" />}
                       </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-xl border border-gray-100 p-6">
-                  <h3 className="text-lg font-bold text-[#0B1A3E] mb-4">System Health</h3>
-                  <div className="space-y-4">
-                    {[
-                      { label: 'API Response Time', value: '1.2s', status: 'good', icon: Activity },
-                      { label: 'Database Status', value: 'Operational', status: 'good', icon: Database },
-                      { label: 'Storage Usage', value: '68%', status: 'warning', icon: Lock },
-                      { label: 'Backup Status', value: 'Last: 2 hours ago', status: 'good', icon: CheckCircle },
-                    ].map((item, i) => (
-                      <div key={i} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                        <div className="flex items-center gap-3">
-                          <item.icon className="w-5 h-5 text-gray-400" />
-                          <span className="text-sm text-gray-700">{item.label}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-[#0B1A3E]">{item.value}</span>
-                          <div className={`w-2 h-2 rounded-full ${
-                            item.status === 'good' ? 'bg-green-500' :
-                            item.status === 'warning' ? 'bg-amber-500' :
-                            'bg-red-500'
-                          }`} />
-                        </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-[#0B1A3E] truncate">{activity.title} <span className="text-gray-400 font-normal">({activity.case_name})</span></p>
+                        <p className="text-xs text-gray-500">{activity.date}</p>
                       </div>
-                    ))}
-                  </div>
+                    </div>
+                  ))}
+                  {activityLog.length === 0 && <p className="text-gray-500 text-sm">No recent activity.</p>}
                 </div>
               </div>
             </TabsContent>
 
+
             <TabsContent value="users" className="space-y-6">
-              {/* User Management */}
               <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
                 <div className="p-4 border-b border-gray-100">
                   <div className="flex flex-col lg:flex-row gap-4">
@@ -395,13 +452,26 @@ export default function AdminDashboard() {
                       <Input
                         placeholder="Search users by name or email..."
                         className="pl-11"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
                       />
                     </div>
                     <div className="flex gap-3">
-                      <Button variant="outline" className="flex items-center gap-2">
-                        <Filter className="w-4 h-4" />
-                        Filter
-                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="outline" className="flex items-center gap-2">
+                            <Filter className="w-4 h-4" />
+                            {roleFilter === 'all' ? 'All Roles' : roleFilter.charAt(0).toUpperCase() + roleFilter.slice(1)}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="bg-white">
+                          <DropdownMenuItem onClick={() => setRoleFilter('all')}>All Roles</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setRoleFilter('admin')}>Admin</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setRoleFilter('police')}>Police</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setRoleFilter('citizen')}>Citizen</DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+
                       <Button className="bg-purple-600">
                         <Users className="w-4 h-4 mr-2" />
                         Add User
@@ -422,192 +492,282 @@ export default function AdminDashboard() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {users.map((user) => (
-                        <tr key={user.id} className="hover:bg-gray-50">
-                          <td className="px-6 py-4">
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
-                                <span className="text-sm font-medium text-gray-600">
-                                  {user.name.split(' ').map(n => n[0]).join('')}
-                                </span>
+                      {allUsers
+                        .filter(user => {
+                          const matchesSearch = (user.first_name + ' ' + user.last_name + user.email).toLowerCase().includes(searchQuery.toLowerCase());
+                          const matchesRole = roleFilter === 'all' || user.role === roleFilter;
+                          return matchesSearch && matchesRole;
+                        })
+                        .map((user) => (
+                          <tr key={user.id} className="hover:bg-gray-50">
+                            <td className="px-6 py-4">
+                              <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
+                                  <span className="text-sm font-medium text-gray-600">
+                                    {user.first_name?.[0]}{user.last_name?.[0]}
+                                  </span>
+                                </div>
+                                <div>
+                                  <p className="font-medium text-[#0B1A3E]">{user.first_name} {user.last_name}</p>
+                                  <p className="text-sm text-gray-500">{user.email}</p>
+                                </div>
                               </div>
-                              <div>
-                                <p className="font-medium text-[#0B1A3E]">{user.name}</p>
-                                <p className="text-sm text-gray-500">{user.email}</p>
+                            </td>
+                            <td className="px-6 py-4">
+                              {getRoleBadge(user.role)}
+                            </td>
+                            <td className="px-6 py-4">
+                              {user.is_verified ? <StatusBadge status={'approved'} size="sm" /> : <StatusBadge status={'pending'} size="sm" />}
+                            </td>
+                            <td className="px-6 py-4">
+                              <div className="text-sm">
+                                <p className="text-gray-600">Joined: {new Date(user.created_at).toLocaleDateString()}</p>
                               </div>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4">
-                            {getRoleBadge(user.role)}
-                          </td>
-                          <td className="px-6 py-4">
-                            <StatusBadge status={user.status as any} size="sm" />
-                          </td>
-                          <td className="px-6 py-4">
-                            <div className="text-sm">
-                              <p className="text-gray-600">Last active: {user.lastActive}</p>
-                              {user.casesVerified && (
-                                <p className="text-gray-500">Cases verified: {user.casesVerified}</p>
-                              )}
-                              {user.casesReported && (
-                                <p className="text-gray-500">Cases reported: {user.casesReported}</p>
-                              )}
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="sm">
-                                  <MoreHorizontal className="w-4 h-4" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuItem onClick={() => openUserDetails(user)}>
-                                  <Eye className="w-4 h-4 mr-2" />
-                                  View Details
-                                </DropdownMenuItem>
-                                {user.status === 'pending' && (
-                                  <DropdownMenuItem onClick={() => handleApproveUser(user.id)}>
-                                    <UserCheck className="w-4 h-4 mr-2" />
-                                    Approve
+                            </td>
+                            <td className="px-6 py-4 text-right">
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="ghost" size="sm">
+                                    <MoreHorizontal className="w-4 h-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="bg-white">
+                                  <DropdownMenuItem onClick={() => {
+                                    // @ts-ignore
+                                    openUserDetails(user)
+                                  }}>
+                                    <Eye className="w-4 h-4 mr-2" />
+                                    View Details
                                   </DropdownMenuItem>
-                                )}
-                                {user.status === 'active' && (
-                                  <DropdownMenuItem onClick={() => handleSuspendUser(user.id)} className="text-red-600">
-                                    <UserX className="w-4 h-4 mr-2" />
-                                    Suspend
-                                  </DropdownMenuItem>
-                                )}
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </td>
-                        </tr>
-                      ))}
+
+                                  {user.role === 'citizen' && (
+                                    <DropdownMenuItem onClick={() => handlePromoteUser(user.id, 'police')} className="text-blue-600">
+                                      <Shield className="w-4 h-4 mr-2" />
+                                      Promote to Police
+                                    </DropdownMenuItem>
+                                  )}
+
+                                  {!user.is_verified && (
+                                    <DropdownMenuItem onClick={() => handleVerify(user.id)} className="text-green-600">
+                                      <UserCheck className="w-4 h-4 mr-2" />
+                                      Verify User
+                                    </DropdownMenuItem>
+                                  )}
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </td>
+                          </tr>
+                        ))}
                     </tbody>
                   </table>
                 </div>
               </div>
             </TabsContent>
 
+            <TabsContent value="matches" className="space-y-6">
+              <div className="bg-white rounded-xl border border-gray-100 p-6">
+                <h3 className="text-lg font-bold text-[#0B1A3E] mb-6">Potential Match Review pending</h3>
+                {potentialMatches.length === 0 ? (
+                  <div className="text-center py-10 text-gray-500">No pending matches to review.</div>
+                ) : (
+                  <div className="grid gap-6">
+                    {potentialMatches.map((match) => (
+                      <div key={match.id} className="border rounded-xl p-4 bg-gray-50">
+                        <div className="flex flex-col md:flex-row gap-6 items-center">
+                          {/* Original Case */}
+                          <div className="flex-1 text-center">
+                            <p className="text-sm font-semibold text-gray-500 mb-2">Original Missing Person</p>
+                            <div className="relative w-40 h-40 mx-auto rounded-lg overflow-hidden border-2 border-blue-200">
+                              <img src={`/uploads/${match.case_image}`} className="w-full h-full object-cover" alt="Original" />
+                            </div>
+                            <p className="mt-2 font-bold text-[#0B1A3E]">{match.case_name}</p>
+                            <p className="text-xs text-gray-500">{match.location}</p>
+                          </div>
+
+                          <div className="flex flex-col items-center">
+                            <div className="bg-white p-2 rounded-full border shadow-sm">
+                              <ArrowRight className="w-6 h-6 text-gray-400" />
+                            </div>
+                          </div>
+
+                          {/* Submitted Match */}
+                          <div className="flex-1 text-center">
+                            <p className="text-sm font-semibold text-gray-500 mb-2">Submitted Evidence</p>
+                            <div className="relative w-40 h-40 mx-auto rounded-lg overflow-hidden border-2 border-amber-200">
+                              <img src={`/user-uploads/${match.submitted_image}`} className="w-full h-full object-cover" alt="Submitted" />
+                            </div>
+                            <p className="mt-2 text-sm text-gray-600">Submitted just now</p>
+                          </div>
+                        </div>
+
+                        <div className="mt-6 flex justify-end gap-3 pt-4 border-t border-gray-200">
+                          <Button variant="outline" className="text-red-600 hover:text-red-700 hover:bg-red-50" onClick={() => handleRejectMatch(match.id)}>
+                            <XCircle className="w-4 h-4 mr-2" />
+                            Reject Match
+                          </Button>
+                          <Button className="bg-green-600 hover:bg-green-700 text-white" onClick={() => handleConfirmMatch(match.id)}>
+                            <CheckCircle className="w-4 h-4 mr-2" />
+                            Confirm Match
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+
             <TabsContent value="activity" className="space-y-6">
               <div className="bg-white rounded-xl border border-gray-100 p-6">
                 <h3 className="text-lg font-bold text-[#0B1A3E] mb-4">System Activity Log</h3>
-                <div className="space-y-4">
-                  {[
-                    { action: 'Case PEH-2026-0045 created', user: 'Priya Sharma', time: '2 min ago', type: 'create' },
-                    { action: 'User k.rao@police.gov.in approved', user: 'Admin', time: '15 min ago', type: 'approve' },
-                    { action: 'Match verified for PEH-2026-0042', user: 'Inspector R. Mehta', time: '1 hour ago', type: 'verify' },
-                    { action: 'System backup completed', user: 'System', time: '2 hours ago', type: 'system' },
-                    { action: 'Case PEH-2026-0038 closed', user: 'Inspector R. Mehta', time: '3 hours ago', type: 'close' },
-                  ].map((log, i) => (
-                    <div key={i} className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                        log.type === 'create' ? 'bg-blue-100' :
-                        log.type === 'approve' ? 'bg-green-100' :
-                        log.type === 'verify' ? 'bg-purple-100' :
-                        log.type === 'system' ? 'bg-gray-100' :
-                        'bg-amber-100'
-                      }`}>
-                        {log.type === 'create' ? <FileText className="w-4 h-4 text-blue-600" /> :
-                         log.type === 'approve' ? <UserCheck className="w-4 h-4 text-green-600" /> :
-                         log.type === 'verify' ? <CheckCircle className="w-4 h-4 text-purple-600" /> :
-                         log.type === 'system' ? <Database className="w-4 h-4 text-gray-600" /> :
-                         <XCircle className="w-4 h-4 text-amber-600" />}
+                <div className="space-y-0 divide-y divide-gray-100">
+                  {activityLog.map((activity, i) => (
+                    <div key={i} className="py-4 flex items-start gap-4">
+                      <div className={`mt-1 w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${activity.title.includes('Submitted') ? 'bg-blue-50' :
+                        activity.title.includes('Match') ? 'bg-green-50' :
+                          activity.title.includes('Closed') ? 'bg-gray-100' :
+                            'bg-purple-50'
+                        }`}>
+                        {activity.title.includes('Submitted') ? <FileText className="w-5 h-5 text-blue-600" /> :
+                          activity.title.includes('Match') ? <CheckCircle className="w-5 h-5 text-green-600" /> :
+                            activity.title.includes('Closed') ? <XCircle className="w-5 h-5 text-gray-600" /> :
+                              <Activity className="w-5 h-5 text-purple-600" />}
                       </div>
                       <div className="flex-1">
-                        <p className="text-sm font-medium text-[#0B1A3E]">{log.action}</p>
-                        <p className="text-xs text-gray-500">by {log.user} • {log.time}</p>
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h4 className="font-semibold text-[#0B1A3E]">{activity.title}</h4>
+                            <p className="text-sm text-gray-600 mt-0.5">{activity.description}</p>
+                            <div className="flex items-center gap-2 mt-2">
+                              <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded-md">
+                                Case: {activity.case_name}
+                              </span>
+                              <span className={`text-xs px-2 py-1 rounded-md capitalize ${activity.status === 'match' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+                                }`}>
+                                Status: {activity.status}
+                              </span>
+                              {activity.title === 'Potential Match Flagged' && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="text-xs h-7 ml-2 text-[#1E6BFF] border-blue-200 hover:bg-blue-50"
+                                  onClick={() => setActiveTab('matches')}
+                                >
+                                  View Match
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                          <span className="text-sm text-gray-500 whitespace-nowrap">{activity.date}</span>
+                        </div>
                       </div>
                     </div>
                   ))}
+                  {activityLog.length === 0 && (
+                    <div className="p-8 text-center text-gray-500">
+                      No activity recorded yet.
+                    </div>
+                  )}
                 </div>
               </div>
             </TabsContent>
+
+            <TabsContent value="pending" className="space-y-6">
+              <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
+                <div className="p-4 border-b border-gray-100">
+                  <h3 className="text-lg font-bold text-[#0B1A3E]">Pending Verification</h3>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {pendingUsers.length === 0 ? (
+                    <div className="p-8 text-center text-gray-500">No pending requests</div>
+                  ) : (
+                    pendingUsers.map(user => (
+                      <div key={user.id} className="p-4 flex items-center justify-between">
+                        <div>
+                          <p className="font-semibold text-[#0B1A3E]">{user.first_name} {user.last_name}</p>
+                          <p className="text-sm text-gray-500">{user.email} • {user.role}</p>
+                        </div>
+                        <Button onClick={() => handleVerify(user.id)} className="bg-green-600">
+                          <CheckCircle className="w-4 h-4 mr-2" />
+                          Verify
+                        </Button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="create-admin" className="space-y-6">
+              <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6 max-w-lg">
+                <h3 className="text-lg font-bold text-[#0B1A3E] mb-4">Create New Administrator</h3>
+                <form onSubmit={handleCreateAdmin} className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <Input placeholder="First Name" value={newAdmin.first_name} onChange={e => setNewAdmin({ ...newAdmin, first_name: e.target.value })} required />
+                    <Input placeholder="Last Name" value={newAdmin.last_name} onChange={e => setNewAdmin({ ...newAdmin, last_name: e.target.value })} required />
+                  </div>
+                  <Input type="email" placeholder="Email Address" value={newAdmin.email} onChange={e => setNewAdmin({ ...newAdmin, email: e.target.value })} required />
+                  <Input type="password" placeholder="Password" value={newAdmin.password} onChange={e => setNewAdmin({ ...newAdmin, password: e.target.value })} required />
+                  <Button type="submit" className="w-full bg-purple-600">Create Admin User</Button>
+                </form>
+              </div>
+            </TabsContent>
+
           </Tabs>
         </div>
       </div>
 
-      {/* User Detail Dialog */}
+      <Footer />
+
+      {/* User Details Dialog */}
       <Dialog open={showUserDialog} onOpenChange={setShowUserDialog}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="sm:max-w-md bg-white">
           <DialogHeader>
             <DialogTitle>User Details</DialogTitle>
-            <DialogDescription>
-              View and manage user information
-            </DialogDescription>
+            <DialogDescription>Detailed information about the selected user.</DialogDescription>
           </DialogHeader>
 
           {selectedUser && (
-            <div className="space-y-6 mt-4">
+            <div className="space-y-4">
               <div className="flex items-center gap-4">
-                <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center">
-                  <span className="text-xl font-medium text-gray-600">
-                    {selectedUser.name.split(' ').map(n => n[0]).join('')}
+                <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center text-xl font-bold text-gray-600">
+                  {selectedUser.first_name?.[0]}{selectedUser.last_name?.[0]}
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-[#0B1A3E]">{selectedUser.first_name} {selectedUser.last_name}</h3>
+                  <div className="flex gap-2 mt-1">
+                    {getRoleBadge(selectedUser.role)}
+                    {selectedUser.is_verified ? <StatusBadge status={'approved'} size="sm" /> : <StatusBadge status={'pending'} size="sm" />}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-3 py-4 border-t border-b border-gray-100">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Email</span>
+                  <span className="font-medium text-[#0B1A3E]">{selectedUser.email}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Phone</span>
+                  <span className="font-medium text-[#0B1A3E]">N/A</span>
+                  {/* Phone not in User interface currently, add if needed */}
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Joined Date</span>
+                  <span className="font-medium text-[#0B1A3E]">
+                    {new Date(selectedUser.created_at).toLocaleDateString()}
                   </span>
                 </div>
-                <div>
-                  <h3 className="text-xl font-bold text-[#0B1A3E]">{selectedUser.name}</h3>
-                  <p className="text-gray-500">{selectedUser.email}</p>
-                  <div className="flex items-center gap-2 mt-2">
-                    {getRoleBadge(selectedUser.role)}
-                    <StatusBadge status={selectedUser.status as any} size="sm" />
-                  </div>
-                </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4 bg-gray-50 rounded-xl p-4">
-                <div>
-                  <p className="text-sm text-gray-500">Joined Date</p>
-                  <p className="font-medium text-[#0B1A3E]">{selectedUser.joinedDate}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">Last Active</p>
-                  <p className="font-medium text-[#0B1A3E]">{selectedUser.lastActive}</p>
-                </div>
-                {selectedUser.casesVerified !== undefined && (
-                  <div>
-                    <p className="text-sm text-gray-500">Cases Verified</p>
-                    <p className="font-medium text-[#0B1A3E]">{selectedUser.casesVerified}</p>
-                  </div>
-                )}
-                {selectedUser.casesReported !== undefined && (
-                  <div>
-                    <p className="text-sm text-gray-500">Cases Reported</p>
-                    <p className="font-medium text-[#0B1A3E]">{selectedUser.casesReported}</p>
-                  </div>
-                )}
-              </div>
-
-              <div className="flex gap-3 pt-4 border-t border-gray-100">
-                {selectedUser.status === 'pending' ? (
-                  <Button 
-                    className="flex-1 bg-green-600"
-                    onClick={() => handleApproveUser(selectedUser.id)}
-                  >
-                    <UserCheck className="w-4 h-4 mr-2" />
-                    Approve User
-                  </Button>
-                ) : selectedUser.status === 'active' ? (
-                  <Button 
-                    variant="outline"
-                    className="flex-1 text-red-600 border-red-200"
-                    onClick={() => handleSuspendUser(selectedUser.id)}
-                  >
-                    <UserX className="w-4 h-4 mr-2" />
-                    Suspend User
-                  </Button>
-                ) : (
-                  <Button 
-                    className="flex-1 bg-green-600"
-                    onClick={() => handleApproveUser(selectedUser.id)}
-                  >
-                    <UserCheck className="w-4 h-4 mr-2" />
-                    Reactivate User
+              <div className="flex justify-end gap-3">
+                {!selectedUser.is_verified && (
+                  <Button onClick={() => handleVerify(selectedUser.id)} className="bg-green-600">
+                    Verify User
                   </Button>
                 )}
-                <Button variant="outline">
-                  <Settings className="w-4 h-4 mr-2" />
-                  Edit
+                <Button variant="outline" onClick={() => setShowUserDialog(false)}>
+                  Close
                 </Button>
               </div>
             </div>
@@ -615,7 +775,6 @@ export default function AdminDashboard() {
         </DialogContent>
       </Dialog>
 
-      <Footer />
-    </div>
+    </div >
   );
 }

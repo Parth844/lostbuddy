@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { 
+import {
   Shield, User, Lock, Eye, EyeOff, ChevronRight,
-  AlertCircle, Mail, Phone
+  AlertCircle, Mail, Phone, Upload, X
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Navbar from '@/components/shared/Navbar';
 import Footer from '@/components/shared/Footer';
 import { Button } from '@/components/ui/button';
+import { register } from '@/services/api';
 
 type UserRole = 'citizen' | 'police';
 
@@ -22,6 +23,9 @@ export default function Signup() {
     password: '',
     confirmPassword: '',
   });
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
@@ -43,6 +47,27 @@ export default function Signup() {
 
   const handleChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) {
+        toast.error('Image size should be less than 5MB');
+        return;
+      }
+      setPhoto(file);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setPhotoPreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const clearPhoto = () => {
+    setPhoto(null);
+    setPhotoPreview(null);
   };
 
   const handleSignup = async (e: React.FormEvent) => {
@@ -76,24 +101,50 @@ export default function Signup() {
 
     setIsLoading(true);
 
-    // Simulate signup
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      // Import register from api
+      const response = await register({
+        first_name: formData.firstName,
+        last_name: formData.lastName,
+        email: formData.email,
+        phone: formData.phone,
+        password: formData.password,
+        role: selectedRole,
+        photo: photo
+      });
 
-    setIsLoading(false);
-    toast.success('Account created successfully!');
+      // Store token and user info
+      localStorage.setItem('token', response.access_token);
+      localStorage.setItem('user_role', response.role);
+      localStorage.setItem('user_name', response.name);
 
-    // Redirect based on role
-    if (selectedRole === 'citizen') {
-      navigate('/dashboard/citizen');
-    } else {
-      navigate('/dashboard/police');
+      toast.success('Account created successfully!');
+
+      // Redirect based on role
+      if (response.role === 'citizen') {
+        navigate('/dashboard/citizen');
+      } else {
+        navigate('/dashboard/police');
+      }
+    } catch (error: any) {
+      console.error(error);
+      const detail = error.response?.data?.detail;
+      if (error.response?.status === 409 && detail === 'UPGRADE_REQUESTED_POLICE') {
+        toast.success("Upgrade to Police requested! Please wait for Admin approval.");
+        // Optional: clear form or navigate to login
+        setTimeout(() => navigate('/login'), 2000);
+      } else {
+        toast.error(detail || 'Registration failed. Please try again.');
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
   return (
     <div className="min-h-screen bg-[#F4F6FA]">
       <Navbar />
-      
+
       <div className="pt-24 pb-20">
         <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12">
           <div className="max-w-lg mx-auto">
@@ -113,23 +164,20 @@ export default function Signup() {
                   <button
                     key={role.id}
                     onClick={() => setSelectedRole(role.id)}
-                    className={`flex flex-col items-center gap-3 p-4 rounded-xl border-2 transition-all ${
-                      selectedRole === role.id
-                        ? 'border-[#1E6BFF] bg-[#1E6BFF]/5'
-                        : 'border-gray-100 hover:border-gray-200'
-                    }`}
+                    className={`flex flex-col items-center gap-3 p-4 rounded-xl border-2 transition-all ${selectedRole === role.id
+                      ? 'border-[#1E6BFF] bg-[#1E6BFF]/5'
+                      : 'border-gray-100 hover:border-gray-200'
+                      }`}
                   >
-                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                      selectedRole === role.id
-                        ? 'bg-[#1E6BFF] text-white'
-                        : 'bg-gray-100 text-gray-500'
-                    }`}>
+                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${selectedRole === role.id
+                      ? 'bg-[#1E6BFF] text-white'
+                      : 'bg-gray-100 text-gray-500'
+                      }`}>
                       <role.icon className="w-6 h-6" />
                     </div>
                     <div className="text-center">
-                      <p className={`font-semibold text-sm ${
-                        selectedRole === role.id ? 'text-[#0B1A3E]' : 'text-gray-700'
-                      }`}>
+                      <p className={`font-semibold text-sm ${selectedRole === role.id ? 'text-[#0B1A3E]' : 'text-gray-700'
+                        }`}>
                         {role.label}
                       </p>
                     </div>
@@ -144,6 +192,47 @@ export default function Signup() {
             {/* Signup Form */}
             <div className="bg-white rounded-[18px] border border-gray-100 shadow-lg p-6">
               <form onSubmit={handleSignup} className="space-y-4">
+                {/* Photo Upload - New Feature */}
+                <div className="flex flex-col items-center mb-6">
+                  <div className="relative">
+                    <div className="w-24 h-24 rounded-full bg-gray-100 flex items-center justify-center border-2 border-gray-200 overflow-hidden mb-2">
+                      {photoPreview ? (
+                        <img
+                          src={photoPreview}
+                          alt="Profile preview"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <User className="w-10 h-10 text-gray-400" />
+                      )}
+                    </div>
+                    {photoPreview ? (
+                      <button
+                        type="button"
+                        onClick={clearPhoto}
+                        className="absolute bottom-0 right-0 p-1.5 bg-red-500 rounded-full text-white hover:bg-red-600 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    ) : (
+                      <label
+                        htmlFor="photo-upload"
+                        className="absolute bottom-0 right-0 p-1.5 bg-[#1E6BFF] rounded-full text-white hover:bg-[#1a5fe6] transition-colors cursor-pointer"
+                      >
+                        <Upload className="w-3 h-3" />
+                      </label>
+                    )}
+                  </div>
+                  <input
+                    id="photo-upload"
+                    type="file"
+                    accept="image/*"
+                    onChange={handlePhotoChange}
+                    className="hidden"
+                  />
+                  <p className="text-sm text-gray-500">Upload Profile Photo</p>
+                </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="label">First Name</label>
@@ -173,7 +262,7 @@ export default function Signup() {
                     <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
                       type="email"
-                      className="input-field pl-11"
+                      className="input-field !pl-12"
                       placeholder="you@example.com"
                       value={formData.email}
                       onChange={(e) => handleChange('email', e.target.value)}
@@ -187,7 +276,7 @@ export default function Signup() {
                     <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
                       type="tel"
-                      className="input-field pl-11"
+                      className="input-field !pl-12"
                       placeholder="+91 XXXXX XXXXX"
                       value={formData.phone}
                       onChange={(e) => handleChange('phone', e.target.value)}
@@ -201,7 +290,7 @@ export default function Signup() {
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
                       type={showPassword ? 'text' : 'password'}
-                      className="input-field pl-11 pr-12"
+                      className="input-field !pl-12 pr-12"
                       placeholder="At least 8 characters"
                       value={formData.password}
                       onChange={(e) => handleChange('password', e.target.value)}
@@ -226,7 +315,7 @@ export default function Signup() {
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
                       type={showPassword ? 'text' : 'password'}
-                      className="input-field pl-11"
+                      className="input-field !pl-12"
                       placeholder="Confirm your password"
                       value={formData.confirmPassword}
                       onChange={(e) => handleChange('confirmPassword', e.target.value)}
@@ -235,8 +324,8 @@ export default function Signup() {
                 </div>
 
                 <label className="flex items-start gap-3 cursor-pointer">
-                  <input 
-                    type="checkbox" 
+                  <input
+                    type="checkbox"
                     className="mt-1 rounded border-gray-300"
                     checked={agreedToTerms}
                     onChange={(e) => setAgreedToTerms(e.target.checked)}
@@ -291,7 +380,7 @@ export default function Signup() {
                 <div>
                   <p className="text-sm font-medium text-amber-900">Demo Registration</p>
                   <p className="text-sm text-amber-800 mt-1">
-                    This is a demo interface. Fill in any information and click 
+                    This is a demo interface. Fill in any information and click
                     "Create Account" to access the dashboard.
                   </p>
                 </div>

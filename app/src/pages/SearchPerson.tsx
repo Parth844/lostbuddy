@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback } from 'react';
-import { Link } from 'react-router-dom';
-import { 
-  Upload, X, Shield, Lock, AlertCircle, 
+import { Link, useNavigate } from 'react-router-dom';
+import {
+  Upload, X, Shield, Lock, AlertCircle,
   CheckCircle, Clock, User, ChevronRight, Scan,
-  Eye, ArrowRight, RefreshCw, Phone, Database
+  Eye, ArrowRight, RefreshCw, Phone, Database,
+  Calendar, MapPin
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Navbar from '@/components/shared/Navbar';
@@ -12,9 +13,10 @@ import StatusBadge from '@/components/shared/StatusBadge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
-import { searchFace, type SearchMatch } from '@/services/api';
+import { searchFace, flagPotentialMatch, type SearchMatch } from '@/services/api';
 
 export default function SearchPerson() {
+  const navigate = useNavigate();
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -37,7 +39,7 @@ export default function SearchPerson() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    
+
     const files = e.dataTransfer.files;
     if (files.length > 0) {
       handleFile(files[0]);
@@ -49,7 +51,7 @@ export default function SearchPerson() {
       toast.error('Please upload an image file');
       return;
     }
-    
+
     if (file.size > 10 * 1024 * 1024) {
       toast.error('File size should be less than 10MB');
       return;
@@ -89,12 +91,12 @@ export default function SearchPerson() {
 
       // Search face
       const searchResponse = await searchFace(uploadedFile);
-      
+
       clearInterval(progressInterval);
       setScanProgress(100);
-      
+
       setResults(searchResponse.results);
-      
+
       if (searchResponse.results.length > 0) {
         toast.success(`Found ${searchResponse.results.length} potential match(es)`);
       } else {
@@ -127,10 +129,24 @@ export default function SearchPerson() {
     return Math.round(score * 100);
   };
 
+  const handleFlagMatch = async () => {
+    if (!selectedMatch || !uploadedFile) {
+      toast.error("No image to submit.");
+      return;
+    }
+    try {
+      await flagPotentialMatch(selectedMatch.FinalPersonId, uploadedFile);
+      toast.success('Potential match flagged and reported to authorities.');
+      setSelectedMatch(null);
+    } catch (error) {
+      toast.error('Failed to flag match. Please try again.');
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#F4F6FA]">
       <Navbar />
-      
+
       <div className="pt-24 pb-20">
         <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12">
           {/* Breadcrumb */}
@@ -147,7 +163,7 @@ export default function SearchPerson() {
                 Search for a Missing Person
               </h1>
               <p className="mt-4 text-gray-600">
-                Upload a photo to check for potential matches in our database. 
+                Upload a photo to check for potential matches in our database.
                 All searches are encrypted and logged.
               </p>
             </div>
@@ -197,7 +213,7 @@ export default function SearchPerson() {
                       className="w-full max-h-[400px] object-contain bg-gray-50"
                     />
                   </div>
-                  
+
                   {!isScanning && !results && (
                     <div className="mt-6 flex justify-center">
                       <Button
@@ -281,8 +297,8 @@ export default function SearchPerson() {
                   <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
                   <div>
                     <p className="text-sm text-amber-800">
-                      <strong>Important:</strong> These are AI-generated potential matches. 
-                      All matches require human verification by authorized officers before 
+                      <strong>Important:</strong> These are AI-generated potential matches.
+                      All matches require human verification by authorized officers before
                       any contact is made. Confidence scores indicate similarity, not certainty.
                     </p>
                   </div>
@@ -299,10 +315,10 @@ export default function SearchPerson() {
                         {/* Photo Placeholder */}
                         <div className="w-24 h-24 sm:w-32 sm:h-32 rounded-xl bg-gray-100 flex items-center justify-center flex-shrink-0">
                           {match.image_file ? (
-                            <img 
-                              src={`/uploads/${match.image_file}`} 
-                              alt={match.name} 
-                              className="w-full h-full object-cover rounded-xl" 
+                            <img
+                              src={`/uploads/${match.image_file}`}
+                              alt={match.name}
+                              className="w-full h-full object-cover rounded-xl"
                               onError={(e) => {
                                 (e.target as HTMLImageElement).style.display = 'none';
                               }}
@@ -334,19 +350,17 @@ export default function SearchPerson() {
                           <div className="mt-4 pt-4 border-t border-gray-100">
                             <div className="flex items-center justify-between">
                               <span className="text-sm text-gray-500">Match Confidence</span>
-                              <span className={`font-bold ${
-                                match.score >= 0.80 ? 'text-green-600' :
+                              <span className={`font-bold ${match.score >= 0.80 ? 'text-green-600' :
                                 match.score >= 0.60 ? 'text-amber-600' : 'text-gray-600'
-                              }`}>
+                                }`}>
                                 {getConfidencePercentage(match.score)}%
                               </span>
                             </div>
                             <div className="mt-2 h-2 bg-gray-100 rounded-full overflow-hidden">
                               <div
-                                className={`h-full rounded-full ${
-                                  match.score >= 0.80 ? 'bg-green-500' :
+                                className={`h-full rounded-full ${match.score >= 0.80 ? 'bg-green-500' :
                                   match.score >= 0.60 ? 'bg-amber-500' : 'bg-gray-400'
-                                }`}
+                                  }`}
                                 style={{ width: `${getConfidencePercentage(match.score)}%` }}
                               />
                             </div>
@@ -370,12 +384,19 @@ export default function SearchPerson() {
                   <p className="text-gray-600 mb-4">
                     Don't see a match? You can report this sighting to help with future searches.
                   </p>
-                  <Link to="/report">
-                    <Button variant="outline" className="flex items-center gap-2 mx-auto">
-                      Report a Sighting
-                      <ArrowRight className="w-4 h-4" />
-                    </Button>
-                  </Link>
+                  <Button
+                    variant="outline"
+                    className="flex items-center gap-2 mx-auto"
+                    onClick={() => navigate('/report', {
+                      state: {
+                        photoFile: uploadedFile,
+                        photoPreview: uploadedImage
+                      }
+                    })}
+                  >
+                    Report Missing Person
+                    <ArrowRight className="w-4 h-4" />
+                  </Button>
                 </div>
               </div>
             )}
@@ -385,79 +406,124 @@ export default function SearchPerson() {
 
       {/* Match Detail Dialog */}
       <Dialog open={!!selectedMatch} onOpenChange={() => setSelectedMatch(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-3xl !bg-white">
           <DialogHeader>
-            <DialogTitle className="text-2xl">Case Details</DialogTitle>
+            <DialogTitle className="flex items-center gap-3">
+              match Details
+              {selectedMatch && <StatusBadge status={getStatusFromScore(selectedMatch.score)} size="sm" />}
+            </DialogTitle>
             <DialogDescription>
-              Review the case information carefully. Contact authorities if you have relevant information.
+              Review the match details carefully
             </DialogDescription>
           </DialogHeader>
-          
+
           {selectedMatch && (
-            <div className="space-y-6">
-              <div className="flex items-start gap-4">
-                <div className="w-24 h-24 rounded-xl bg-gray-100 flex items-center justify-center">
-                  {selectedMatch.image_file ? (
-                    <img 
-                      src={`/uploads/${selectedMatch.image_file}`} 
-                      alt={selectedMatch.name} 
-                      className="w-full h-full object-cover rounded-xl"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
-                  ) : (
-                    <User className="w-12 h-12 text-gray-300" />
-                  )}
+            <div className="space-y-6 mt-4">
+              {/* Case Info */}
+              <div className="grid grid-cols-2 gap-4 bg-gray-50 rounded-xl p-4">
+                <div>
+                  <p className="text-sm text-gray-500">Case ID</p>
+                  <p className="font-mono font-medium text-[#0B1A3E]">{selectedMatch.FinalPersonId}</p>
                 </div>
                 <div>
-                  <h3 className="text-xl font-bold text-[#0B1A3E]">{selectedMatch.name}</h3>
-                  <p className="text-gray-500">
-                    {new Date().getFullYear() - selectedMatch.birth_year} years • {selectedMatch.sex}
-                  </p>
-                  <div className="mt-2">
-                    <StatusBadge status={getStatusFromScore(selectedMatch.score)} />
+                  <p className="text-sm text-gray-500">Reported Date</p>
+                  <p className="font-medium text-[#0B1A3E]">Unknown</p>
+                </div>
+              </div>
+
+              {/* Missing Person Details */}
+              <div>
+                <h4 className="font-semibold text-[#0B1A3E] mb-3">Missing Person</h4>
+                <div className="flex gap-4 mb-4">
+                  <div className="w-24 h-24 rounded-lg overflow-hidden bg-gray-100 flex-shrink-0 border border-gray-200">
+                    {selectedMatch.image_file ? (
+                      <img
+                        src={`/uploads/${selectedMatch.image_file}`}
+                        alt={selectedMatch.name}
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-gray-400">
+                        <User className="w-8 h-8" />
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex-1 grid sm:grid-cols-2 gap-4">
+                    <div className="flex items-start gap-3">
+                      <User className="w-5 h-5 text-gray-400 mt-0.5" />
+                      <div>
+                        <p className="font-medium text-[#0B1A3E]">{selectedMatch.name}</p>
+                        <p className="text-sm text-gray-500">
+                          {new Date().getFullYear() - selectedMatch.birth_year} years • {selectedMatch.sex === 'M' ? 'Male' : selectedMatch.sex === 'F' ? 'Female' : selectedMatch.sex}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <MapPin className="w-5 h-5 text-gray-400 mt-0.5" />
+                      <div>
+                        <p className="font-medium text-[#0B1A3E]">{selectedMatch.district}, {selectedMatch.state}</p>
+                        <p className="text-sm text-gray-500">Police Station: {selectedMatch.police_station}</p>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4 bg-gray-50 rounded-xl p-4">
-                <div>
-                  <p className="text-sm text-gray-500">Case ID</p>
-                  <p className="font-mono text-[#0B1A3E]">{selectedMatch.FinalPersonId}</p>
+              {/* Reporter Info - Placeholder for consistency */}
+              <div>
+                <h4 className="font-semibold text-[#0B1A3E] mb-3">Reporter Information</h4>
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div className="flex items-start gap-3">
+                    <User className="w-5 h-5 text-gray-400 mt-0.5" />
+                    <div>
+                      <p className="font-medium text-[#0B1A3E]">Anonymous</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Calendar className="w-5 h-5 text-gray-400 mt-0.5" />
+                    <div>
+                      <p className="font-medium text-[#0B1A3E]">N/A</p>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-sm text-gray-500">Status</p>
-                  <p className="text-[#0B1A3E]">{selectedMatch.tracing_status}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">State</p>
-                  <p className="text-[#0B1A3E]">{selectedMatch.state}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500">District</p>
-                  <p className="text-[#0B1A3E]">{selectedMatch.district}</p>
-                </div>
-                <div className="col-span-2">
-                  <p className="text-sm text-gray-500">Police Station</p>
-                  <p className="text-[#0B1A3E]">{selectedMatch.police_station}</p>
+              </div>
+
+              {/* Match Confidence */}
+              <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                <h4 className="font-semibold text-green-900 mb-2">AI Match Found</h4>
+                <div className="flex items-center gap-4">
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm text-green-700">Confidence Score</span>
+                      <span className="font-bold text-green-900">{getConfidencePercentage(selectedMatch.score)}%</span>
+                    </div>
+                    <div className="h-3 bg-green-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-green-500 rounded-full"
+                        style={{ width: `${getConfidencePercentage(selectedMatch.score)}%` }}
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
 
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
                 <p className="text-sm text-amber-800">
-                  <strong>Next Steps:</strong> If you believe this is a valid match, 
-                  please contact the nearest police station or call our support line. 
+                  <strong>Next Steps:</strong> If you believe this is a valid match,
+                  please contact the nearest police station or call our support line.
                   Do not attempt to contact the family directly.
                 </p>
               </div>
 
               <div className="flex gap-3">
-                <Button className="flex-1 bg-[#1E6BFF]">
+                <Button className="flex-1 bg-[#1E6BFF]" onClick={() => navigate('/contact')}>
                   <Phone className="w-4 h-4 mr-2" />
                   Contact Support
                 </Button>
-                <Button variant="outline" className="flex-1">
+                <Button variant="outline" className="flex-1" onClick={handleFlagMatch}>
                   <CheckCircle className="w-4 h-4 mr-2" />
                   Mark as Potential Match
                 </Button>

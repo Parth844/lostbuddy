@@ -20,7 +20,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { getCases, getDashboardStats, type Case, type DashboardStats } from '@/services/api';
+import { getCases, getDashboardStats, updateCaseStatus, type Case, type DashboardStats } from '@/services/api';
 
 export default function PoliceDashboard() {
   const [selectedCase, setSelectedCase] = useState<Case | null>(null);
@@ -107,16 +107,37 @@ export default function PoliceDashboard() {
   // Client-side filtering is no longer needed as we do it on server
   const filteredCases = cases;
 
-  const handleApprove = (caseId: string) => {
-    toast.success(`Case ${caseId} approved`);
-    setShowCaseDialog(false);
-    fetchCases();
+  const handleApprove = async (caseId: string) => {
+    try {
+      await updateCaseStatus(caseId, 'verified');
+      toast.success(`Case ${caseId} approved`);
+      setShowCaseDialog(false);
+      fetchCases();
+    } catch (e) {
+      toast.error('Failed to approve case');
+    }
   };
 
-  const handleReject = (caseId: string) => {
-    toast.error(`Case ${caseId} rejected`);
-    setShowCaseDialog(false);
-    fetchCases();
+  const handleReject = async (caseId: string) => {
+    try {
+      await updateCaseStatus(caseId, 'rejected');
+      toast.error(`Case ${caseId} rejected`);
+      setShowCaseDialog(false);
+      fetchCases();
+    } catch (e) {
+      toast.error('Failed to reject case');
+    }
+  };
+
+  const handleConfirmMatch = async (caseId: string) => {
+    try {
+      await updateCaseStatus(caseId, 'match-confirmed');
+      toast.success(`Match confirmed for case ${caseId}`);
+      setShowCaseDialog(false);
+      fetchCases();
+    } catch (e) {
+      toast.error('Failed to confirm match');
+    }
   };
 
   const openCaseDetails = (caseItem: Case) => {
@@ -578,7 +599,7 @@ export default function PoliceDashboard() {
                   <>
                     <Button
                       className="flex-1 bg-green-600 hover:bg-green-700"
-                      onClick={() => toast.success('Match confirmed')}
+                      onClick={() => handleConfirmMatch(selectedCase.case_id)}
                     >
                       <CheckCircle className="w-4 h-4 mr-2" />
                       Confirm Match

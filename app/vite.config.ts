@@ -12,4 +12,10 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    proxy: {
+      '/uploads': 'http://localhost:8000',
+      '/user-uploads': 'http://localhost:8000',
+    }
+  },
 });

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import Navbar from '@/components/shared/Navbar';
 import Footer from '@/components/shared/Footer';
 import { Button } from '@/components/ui/button';
@@ -21,6 +22,7 @@ type Step = 'personal' | 'location' | 'photo' | 'review';
 export default function ReportMissing() {
   const [currentStep, setCurrentStep] = useState<Step>('personal');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const location = useLocation();
 
   const [formData, setFormData] = useState<FormData>({
     firstName: '',
@@ -33,6 +35,17 @@ export default function ReportMissing() {
     photo: null,
     photoFile: null
   });
+
+  useEffect(() => {
+    if (location.state?.photoFile) {
+      setFormData(prev => ({
+        ...prev,
+        photoFile: location.state.photoFile,
+        photo: location.state.photoPreview
+      }));
+      toast.info('Photo from search included in report');
+    }
+  }, [location.state]);
 
   const [errors, setErrors] = useState<FormErrors>({});
 
@@ -139,7 +152,7 @@ export default function ReportMissing() {
     <div className="min-h-screen bg-[#F4F6FA] flex flex-col">
       <Navbar />
 
-      <div className="flex-1 container max-w-4xl mx-auto px-4 py-8 lg:py-12">
+      <div className="flex-1 container max-w-4xl mx-auto px-4 pt-24 pb-12">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-[#0B1A3E]">Report a Missing Person</h1>
           <p className="text-gray-600 mt-2">
@@ -159,8 +172,8 @@ export default function ReportMissing() {
                 <div key={step.id} className="flex flex-col items-center bg-[#F4F6FA] px-2 sm:px-4">
                   <div
                     className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors duration-300 ${isActive || isCompleted
-                        ? 'bg-[#1E6BFF] text-white'
-                        : 'bg-white border-2 border-gray-200 text-gray-400'
+                      ? 'bg-[#1E6BFF] text-white'
+                      : 'bg-white border-2 border-gray-200 text-gray-400'
                       }`}
                   >
                     <step.icon className="w-5 h-5" />

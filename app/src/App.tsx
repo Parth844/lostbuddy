@@ -18,10 +18,13 @@ import DataUsage from '@/pages/DataUsage';
 import Contact from '@/pages/Contact';
 import Cases from '@/pages/Cases';
 import CaseDetails from '@/pages/CaseDetails';
+import ProtectedRoute from '@/components/shared/ProtectedRoute';
+import ScrollToTop from '@/components/shared/ScrollToTop';
 
 function App() {
   return (
     <Router>
+      <ScrollToTop />
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/cases" element={<Cases />} />
@@ -33,15 +36,34 @@ function App() {
         <Route path="/cases" element={<Cases />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
-        <Route path="/dashboard/citizen" element={<CitizenDashboard />} />
-        <Route path="/dashboard/police" element={<PoliceDashboard />} />
-        <Route path="/dashboard/admin" element={<AdminDashboard />} />
+        <Route path="/dashboard/citizen" element={
+          <ProtectedRoute allowedRoles={['citizen', 'police', 'admin']}>
+            <CitizenDashboard />
+          </ProtectedRoute>
+        } />
+        <Route path="/dashboard/police" element={
+          <ProtectedRoute allowedRoles={['police', 'admin']}>
+            <PoliceDashboard />
+          </ProtectedRoute>
+        } />
+        <Route path="/dashboard/admin" element={
+          <ProtectedRoute allowedRoles={['admin']}>
+            <AdminDashboard />
+          </ProtectedRoute>
+        } />
         <Route path="/about" element={<About />} />
         <Route path="/privacy" element={<Privacy />} />
         <Route path="/data-usage" element={<DataUsage />} />
         <Route path="/contact" element={<Contact />} />
       </Routes>
-      <Toaster position="top-right" />
+      <Toaster
+        position="top-right"
+        theme="light"
+        richColors
+        closeButton
+        className="bg-white"
+        style={{ background: 'white' }}
+      />
     </Router>
   );
 }

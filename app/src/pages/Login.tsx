@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { 
+import {
   Shield, User, Lock, Eye, EyeOff, ChevronRight,
-  CheckCircle, AlertCircle
+  AlertCircle
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Navbar from '@/components/shared/Navbar';
 import Footer from '@/components/shared/Footer';
 import { Button } from '@/components/ui/button';
+import { login } from '@/services/api';
 
 type UserRole = 'citizen' | 'police' | 'admin';
 
@@ -42,7 +43,7 @@ export default function Login() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!email.trim() || !password.trim()) {
       toast.error('Please enter both email and password');
       return;
@@ -50,30 +51,42 @@ export default function Login() {
 
     setIsLoading(true);
 
-    // Simulate login
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    try {
+      const response = await login(email, password);
 
-    setIsLoading(false);
-    toast.success(`Logged in as ${selectedRole}`);
+      // Store token
+      localStorage.setItem('token', response.access_token);
+      localStorage.setItem('user_role', response.role);
+      localStorage.setItem('user_name', response.name);
 
-    // Redirect based on role
-    switch (selectedRole) {
-      case 'citizen':
-        navigate('/dashboard/citizen');
-        break;
-      case 'police':
-        navigate('/dashboard/police');
-        break;
-      case 'admin':
-        navigate('/dashboard/admin');
-        break;
+      setIsLoading(false);
+      toast.success(`Logged in as ${response.role}`);
+
+      // Redirect based on role
+      switch (response.role) {
+        case 'citizen':
+          navigate('/dashboard/citizen');
+          break;
+        case 'police':
+          navigate('/dashboard/police');
+          break;
+        case 'admin':
+          navigate('/dashboard/admin');
+          break;
+        default:
+          navigate('/');
+      }
+    } catch (error: any) {
+      console.error(error);
+      toast.error(error.response?.data?.detail || 'Login failed. Please check your credentials.');
+      setIsLoading(false);
     }
   };
 
   return (
     <div className="min-h-screen bg-[#F4F6FA]">
       <Navbar />
-      
+
       <div className="pt-24 pb-20">
         <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12">
           <div className="max-w-md mx-auto">
@@ -87,39 +100,25 @@ export default function Login() {
 
             {/* Role Selection */}
             <div className="bg-white rounded-[18px] border border-gray-100 shadow-lg p-6 mb-6">
-              <p className="text-sm font-medium text-gray-500 mb-4">Select your role</p>
-              <div className="space-y-3">
-                {roles.map((role) => (
-                  <button
-                    key={role.id}
-                    onClick={() => setSelectedRole(role.id)}
-                    className={`w-full flex items-center gap-4 p-4 rounded-xl border-2 transition-all ${
-                      selectedRole === role.id
-                        ? 'border-[#1E6BFF] bg-[#1E6BFF]/5'
-                        : 'border-gray-100 hover:border-gray-200'
-                    }`}
-                  >
-                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                      selectedRole === role.id
-                        ? 'bg-[#1E6BFF] text-white'
-                        : 'bg-gray-100 text-gray-500'
-                    }`}>
-                      <role.icon className="w-6 h-6" />
-                    </div>
-                    <div className="text-left flex-1">
-                      <p className={`font-semibold ${
-                        selectedRole === role.id ? 'text-[#0B1A3E]' : 'text-gray-700'
-                      }`}>
-                        {role.label}
-                      </p>
-                      <p className="text-sm text-gray-500">{role.description}</p>
-                    </div>
-                    {selectedRole === role.id && (
-                      <CheckCircle className="w-5 h-5 text-[#1E6BFF]" />
-                    )}
-                  </button>
-                ))}
+              <label className="label">Select your role</label>
+              <div className="relative">
+                <User className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <select
+                  value={selectedRole}
+                  onChange={(e) => setSelectedRole(e.target.value as UserRole)}
+                  className="input-field !pl-12 !pr-12 appearance-none bg-white"
+                >
+                  {roles.map((role) => (
+                    <option key={role.id} value={role.id}>
+                      {role.label}
+                    </option>
+                  ))}
+                </select>
+                <ChevronRight className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 rotate-90" />
               </div>
+              <p className="text-sm text-gray-500 mt-3">
+                {roles.find(r => r.id === selectedRole)?.description}
+              </p>
             </div>
 
             {/* Login Form */}
@@ -212,7 +211,7 @@ export default function Login() {
                 <div>
                   <p className="text-sm font-medium text-amber-900">Demo Credentials</p>
                   <p className="text-sm text-amber-800 mt-1">
-                    This is a demo interface. Click "Sign In" with any email/password 
+                    This is a demo interface. Click "Sign In" with any email/password
                     to access the {selectedRole} dashboard.
                   </p>
                 </div>

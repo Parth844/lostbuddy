@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Menu, X, Shield, User } from 'lucide-react';
+import { Menu, X, Shield, User, UserPlus, LogOut } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,6 +18,13 @@ export default function Navbar({ variant = 'default' }: NavbarProps) {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
+
+  const handleSignOut = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user_role');
+    localStorage.removeItem('user_name');
+    navigate('/');
+  };
 
   useEffect(() => {
     const handleScroll = () => {
@@ -97,12 +104,18 @@ export default function Navbar({ variant = 'default' }: NavbarProps) {
                 <DropdownMenuItem onClick={() => navigate('/dashboard/citizen')}>
                   Citizen Dashboard
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => navigate('/dashboard/police')}>
-                  Police Dashboard
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => navigate('/dashboard/admin')}>
-                  Admin Dashboard
-                </DropdownMenuItem>
+
+                {['police', 'admin'].includes(localStorage.getItem('user_role') || '') && (
+                  <DropdownMenuItem onClick={() => navigate('/dashboard/police')}>
+                    Police Dashboard
+                  </DropdownMenuItem>
+                )}
+
+                {['admin'].includes(localStorage.getItem('user_role') || '') && (
+                  <DropdownMenuItem onClick={() => navigate('/dashboard/admin')}>
+                    Admin Dashboard
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
 
@@ -115,14 +128,15 @@ export default function Navbar({ variant = 'default' }: NavbarProps) {
               <DropdownMenuContent align="end" className="w-48 !bg-white">
                 <DropdownMenuItem onClick={() => navigate('/login')}>
                   <User className="w-4 h-4 mr-2" />
-                  Citizen Login
+                  Login
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => navigate('/login')}>
-                  <Shield className="w-4 h-4 mr-2" />
-                  Officer Login
+                <DropdownMenuItem onClick={() => navigate('/signup')}>
+                  <UserPlus className="w-4 h-4 mr-2" />
+                  Sign Up
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => console.log('Sign Out')} className="text-red-500 hover:text-red-600 focus:text-red-600">
+                <DropdownMenuItem onClick={handleSignOut} className="text-red-500 hover:text-red-600 focus:text-red-600">
+                  <LogOut className="w-4 h-4 mr-2" />
                   Sign Out
                 </DropdownMenuItem>
               </DropdownMenuContent>

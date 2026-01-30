@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { 
-  Search, Clock, Shield, User, MapPin, 
+import {
+  Search, Clock, Shield, User, MapPin,
   Calendar, FileText, ChevronRight, AlertCircle,
   RefreshCw, Copy, Check, Phone, Mail
 } from 'lucide-react';
@@ -11,7 +11,7 @@ import Footer from '@/components/shared/Footer';
 import StatusBadge from '@/components/shared/StatusBadge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
-import { getCaseById, type Case } from '@/services/api';
+import { getCaseById, getCaseTimeline, type Case, type TimelineEvent } from '@/services/api';
 
 export default function TrackCase() {
   const [searchParams] = useSearchParams();
@@ -21,6 +21,7 @@ export default function TrackCase() {
   const [notFound, setNotFound] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showContactDialog, setShowContactDialog] = useState(false);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
 
   useEffect(() => {
     const id = searchParams.get('id');
@@ -41,8 +42,15 @@ export default function TrackCase() {
     setCaseData(null);
 
     try {
-      const data = await getCaseById(id.toUpperCase());
+      const data = await getCaseById(id.trim());
       setCaseData(data);
+      // Fetch timeline
+      try {
+        const events = await getCaseTimeline(id.trim());
+        setTimelineEvents(events);
+      } catch (e) {
+        console.error("Failed to load timeline", e);
+      }
     } catch (error: any) {
       if (error.response?.status === 404) {
         setNotFound(true);
@@ -80,47 +88,13 @@ export default function TrackCase() {
     }
   };
 
-  const getTimeline = (caseData: Case) => {
-    const timeline = [
-      {
-        stage: 'Case Submitted',
-        date: caseData.reported_date,
-        description: 'Your report has been received and is being processed.',
-        completed: true,
-      },
-      {
-        stage: 'Information Verified',
-        date: caseData.status !== 'submitted' ? caseData.reported_date : 'Pending',
-        description: 'Basic information has been verified by our team.',
-        completed: caseData.status !== 'submitted',
-      },
-      {
-        stage: 'Under Review',
-        date: ['under-review', 'matched', 'closed'].includes(caseData.status) ? 'In Progress' : 'Pending',
-        description: 'Case is being actively reviewed by authorities. AI matching in progress.',
-        completed: ['under-review', 'matched', 'closed'].includes(caseData.status),
-        active: caseData.status === 'under-review',
-      },
-      {
-        stage: 'Match Found',
-        date: ['matched', 'closed'].includes(caseData.status) ? 'Completed' : 'Pending',
-        description: 'Potential matches will be reviewed and verified.',
-        completed: ['matched', 'closed'].includes(caseData.status),
-      },
-      {
-        stage: 'Case Closed',
-        date: caseData.status === 'closed' ? 'Completed' : 'Pending',
-        description: 'Final resolution and case closure.',
-        completed: caseData.status === 'closed',
-      },
-    ];
-    return timeline;
-  };
+  // getTimeline removed, using server data
+
 
   return (
     <div className="min-h-screen bg-[#F4F6FA]">
       <Navbar />
-      
+
       <div className="pt-24 pb-20">
         <div className="w-full px-4 sm:px-6 lg:px-8 xl:px-12">
           {/* Breadcrumb */}
@@ -149,7 +123,7 @@ export default function TrackCase() {
                   <input
                     type="text"
                     placeholder="Enter Case ID (e.g., PEH-2026-0001)"
-                    className="input-field pl-12"
+                    className="input-field !pl-12"
                     value={caseId}
                     onChange={(e) => setCaseId(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -173,9 +147,9 @@ export default function TrackCase() {
                   )}
                 </Button>
               </div>
-              
+
               <p className="text-sm text-gray-500 mt-4 text-center">
-                Case ID was provided when you submitted your report. 
+                Case ID was provided when you submitted your report.
                 <Link to="/contact" className="text-[#1E6BFF] ml-1 hover:underline">
                   Lost your case ID?
                 </Link>
@@ -221,14 +195,32 @@ export default function TrackCase() {
                 {/* Case Header */}
                 <div className="bg-white rounded-[18px] border border-gray-100 shadow-lg p-6">
                   <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div>
-                      <div className="flex items-center gap-3 mb-2">
-                        <h2 className="text-2xl font-bold text-[#0B1A3E]">{caseData.name}</h2>
-                        <StatusBadge status={caseData.status} />
+                    <div className="flex gap-4">
+                      <div className="w-24 h-24 rounded-lg overflow-hidden bg-gray-100 flex-shrink-0 border border-gray-200">
+                        {caseData.image_file ? (
+                          <img
+                            src={`/uploads/${caseData.image_file}`}
+                            alt={caseData.name}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-gray-400">
+                            <User className="w-8 h-8" />
+                          </div>
+                        )}
                       </div>
-                      <p className="text-gray-500">
-                        {caseData.age} years • {caseData.gender}
-                      </p>
+                      <div>
+                        <div className="flex items-center gap-3 mb-2">
+                          <h2 className="text-2xl font-bold text-[#0B1A3E]">{caseData.name}</h2>
+                          <StatusBadge status={caseData.status} />
+                        </div>
+                        <p className="text-gray-500">
+                          {caseData.age} years • {caseData.gender}
+                        </p>
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-lg text-[#0B1A3E]">{caseData.case_id}</span>
@@ -256,36 +248,33 @@ export default function TrackCase() {
                   {/* Timeline */}
                   <div className="lg:col-span-2 bg-white rounded-[18px] border border-gray-100 shadow-lg p-6">
                     <h3 className="text-lg font-bold text-[#0B1A3E] mb-6">Case Timeline</h3>
-                    
+
                     <div className="timeline">
-                      {getTimeline(caseData).map((item, index) => (
-                        <div 
+                      {timelineEvents.map((item, index) => (
+                        <div
                           key={index}
-                          className={`timeline-item ${item.completed ? 'completed' : ''} ${item.active ? 'active' : ''}`}
+                          className={`timeline-item completed`} // Simplified for now, or match logic
                         >
                           <div className="bg-gray-50 rounded-xl p-4">
                             <div className="flex items-start justify-between gap-4">
                               <div>
-                                <h4 className={`font-semibold ${
-                                  item.completed || item.active ? 'text-[#0B1A3E]' : 'text-gray-400'
-                                }`}>
-                                  {item.stage}
+                                <h4 className="font-semibold text-[#0B1A3E]">
+                                  {item.title}
                                 </h4>
-                                <p className={`text-sm mt-1 ${
-                                  item.completed || item.active ? 'text-gray-600' : 'text-gray-400'
-                                }`}>
+                                <p className="text-sm mt-1 text-gray-600">
                                   {item.description}
                                 </p>
                               </div>
-                              <span className={`text-sm whitespace-nowrap ${
-                                item.completed || item.active ? 'text-gray-500' : 'text-gray-400'
-                              }`}>
+                              <span className="text-sm whitespace-nowrap text-gray-500">
                                 {item.date}
                               </span>
                             </div>
                           </div>
                         </div>
                       ))}
+                      {timelineEvents.length === 0 && (
+                        <p className="text-gray-500 text-center">No timeline updates yet.</p>
+                      )}
                     </div>
                   </div>
 
@@ -293,7 +282,7 @@ export default function TrackCase() {
                   <div className="space-y-6">
                     <div className="bg-white rounded-[18px] border border-gray-100 shadow-lg p-6">
                       <h3 className="text-lg font-bold text-[#0B1A3E] mb-4">Case Information</h3>
-                      
+
                       <div className="space-y-4">
                         <div className="flex items-start gap-3">
                           <Calendar className="w-5 h-5 text-gray-400 mt-0.5" />
@@ -342,7 +331,7 @@ export default function TrackCase() {
 
                     <div className="bg-white rounded-[18px] border border-gray-100 shadow-lg p-6">
                       <h3 className="text-lg font-bold text-[#0B1A3E] mb-4">Reporter Information</h3>
-                      
+
                       <div className="space-y-3">
                         <div className="flex items-center gap-3">
                           <User className="w-5 h-5 text-gray-400" />
@@ -381,14 +370,14 @@ export default function TrackCase() {
 
       {/* Contact Dialog */}
       <Dialog open={showContactDialog} onOpenChange={setShowContactDialog}>
-        <DialogContent>
+        <DialogContent className="!bg-white">
           <DialogHeader>
             <DialogTitle>Contact Support</DialogTitle>
             <DialogDescription>
               Get in touch with our support team for assistance with your case.
             </DialogDescription>
           </DialogHeader>
-          
+
           <div className="space-y-4 mt-4">
             <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-xl">
               <Phone className="w-5 h-5 text-[#1E6BFF]" />
@@ -397,7 +386,7 @@ export default function TrackCase() {
                 <p className="font-medium text-[#0B1A3E]">1800-XXX-XXXX</p>
               </div>
             </div>
-            
+
             <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-xl">
               <Mail className="w-5 h-5 text-[#1E6BFF]" />
               <div>
@@ -405,7 +394,7 @@ export default function TrackCase() {
                 <p className="font-medium text-[#0B1A3E]">support@pehchaan.gov.in</p>
               </div>
             </div>
-            
+
             <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-xl">
               <Shield className="w-5 h-5 text-[#1E6BFF]" />
               <div>
