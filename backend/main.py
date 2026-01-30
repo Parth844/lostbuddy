@@ -21,7 +21,8 @@ def root():
 # -------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # restrict in prod
+    allow_origins=["https://jhku5paqt5rcq.ok.kimi.link", "http://localhost:5173"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -29,7 +30,17 @@ app.add_middleware(
 # -------------------------
 # Static files
 # -------------------------
-IMAGES_DIR = "/app/final_images"
+# -------------------------
+# Static files
+# -------------------------
+# Try to find images relative to this file first (Local dev)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+IMAGES_DIR = os.path.join(BASE_DIR, "../final_images")
+
+if not os.path.exists(IMAGES_DIR):
+    # Fallback for Docker
+    IMAGES_DIR = "/app/final_images"
+
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 print("📂 Serving images from:", IMAGES_DIR)
@@ -313,6 +324,91 @@ async def report_missing(
         
 from fastapi import Query
 
+@app.get("/dashboard/stats")
+def get_dashboard_stats():
+    cursor.execute("SELECT COUNT(*) FROM persons")
+    total_cases = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status = 'Traced'")
+    traced = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status IN ('Untraced', 'missing')")
+    untraced = cursor.fetchone()[0]
+
+    # Assuming 'matched' status indicates a confirmed match
+    cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status = 'matched'")
+    matched = cursor.fetchone()[0]
+
+    # 1. Status Distribution
+    # We map DB tracing_status to frontend friendly labels
+    # submitted: 'missing', 'Untraced'
+    # verified: (custom logic or explicit status if added) - here simplifying
+    # matched: 'matched'
+    
+    cursor.execute("""
+        SELECT tracing_status, COUNT(*) 
+        FROM persons 
+        GROUP BY tracing_status
+    """)
+    status_rows = cursor.fetchall()
+    
+    # Init defaults
+    distribution = {
+        "submitted": 0,
+        "verified": 0,
+        "under_review": 0,
+        "matched": 0,
+        "closed": 0
+    }
+    
+    for status, count in status_rows:
+        s = status.lower()
+        if s in ['missing', 'untraced']:
+            distribution['submitted'] += count
+        elif s == 'matched':
+            distribution['matched'] += count
+        elif s == 'verified':
+            distribution['verified'] += count
+        elif s == 'under-review':
+            distribution['under_review'] += count
+        elif s == 'closed':
+            distribution['closed'] += count
+        else:
+            # Fallback for others
+            distribution['submitted'] += count
+
+    # 2. Weekly Activity (Last 7 days)
+    # Using Postgres to_char for day name.
+    # Note: If no cases on a day, it won't return a row. We handle filling gaps in Python or frontend.
+    # We'll return the raw counts per day name for simplicity.
+    
+    cursor.execute("""
+        SELECT to_char(created_at, 'Day'), COUNT(*)
+        FROM persons
+        WHERE created_at >= NOW() - INTERVAL '7 days'
+        GROUP BY 1, EXTRACT(DOW FROM created_at)
+        ORDER BY EXTRACT(DOW FROM created_at)
+    """)
+    activity_rows = cursor.fetchall()
+    
+    # Format: [{'day': 'Mon', 'cases': 5}, ...]
+    weekly_activity = []
+    for day, count in activity_rows:
+        weekly_activity.append({"day": day.strip()[:3], "cases": count})
+
+    return {
+        "success": True,
+        "stats": {
+            "total_cases": total_cases,
+            "traced": traced,
+            "untraced": untraced,
+            "matched": matched,
+            "case_status_distribution": distribution,
+            "weekly_activity": weekly_activity
+        }
+    }
+
+
 @app.get("/cases")
 def get_cases(
     page: int = 1,
@@ -321,6 +417,8 @@ def get_cases(
     state: str | None = None,
     status: str | None = None,
     gender: str | None = None,
+    min_age: int | None = None,
+    max_age: int | None = None,
 ):
     offset = (page - 1) * limit
     conditions = []
@@ -339,8 +437,23 @@ def get_cases(
         values.append(status)
 
     if gender:
-        conditions.append("sex = %s")
-        values.append(gender.upper())
+        conditions.append("LOWER(sex) = LOWER(%s)")
+        values.append(gender)
+
+    if min_age is not None and max_age is not None:
+        import datetime
+        current_year = datetime.datetime.now().year
+        # Age 10 => born in 2015 (if 2025). max_birth_year
+        # Age 20 => born in 2005. min_birth_year
+        # Range age [10, 20] => birth_year [2005, 2015]
+        # birth_year >= (current - max_age) AND birth_year <= (current - min_age)
+        
+        min_birth_year = current_year - max_age
+        max_birth_year = current_year - min_age
+        
+        conditions.append("birth_year >= %s AND birth_year <= %s")
+        values.append(min_birth_year)
+        values.append(max_birth_year)
 
     where_clause = ""
     if conditions:
