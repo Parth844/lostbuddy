@@ -171,6 +171,7 @@ PostgreSQL (Metadata)
 - `.env` is never committed
 - Docker volumes isolate DB data
 - CORS can be restricted in production
+- **Repository Visibility**: See [REPOSITORY_SETTINGS.md](./REPOSITORY_SETTINGS.md) for instructions on making this repository private
 
 ---
 
