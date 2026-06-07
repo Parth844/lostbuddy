@@ -36,9 +36,12 @@ uvicorn main:app --reload --port 8000
 
 ```bash
 docker-compose up --build        # first run: ~10 min (downloads InsightFace model)
+docker-compose up postgres qdrant -d   # start only DBs (for local backend dev)
 docker-compose down              # stop, keep data
 docker-compose down -v           # DANGER: deletes pgdata/ and qdrant_storage/
 ```
+
+All 4 services are containerized: `pehchaan_frontend` (nginx:80→5173), `pehchaan_backend` (8000), `pehchaan_postgres` (5433→5432), `pehchaan_qdrant` (6333).
 
 ---
 
@@ -54,6 +57,7 @@ Frontend (React) → Axios → FastAPI → PostgreSQL (metadata)
 - Qdrant collection: `missing_person_faces`, vector size 512, cosine distance
 - `final_person_id` is the join key between Qdrant and PostgreSQL
 - Global psycopg2 `cursor`/`conn` in `db.py` — call `conn.commit()` after every write, `conn.rollback()` on exception
+- `db.py` reads connection config from env vars with local-dev defaults (`POSTGRES_HOST=localhost`, `POSTGRES_PORT=5433`). In Docker, `docker-compose.yml` overrides these to `postgres:5432`.
 
 ## Image Storage
 

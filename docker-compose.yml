@@ -1,26 +1,42 @@
-
 services:
+
+  frontend:
+    build:
+      context: ./app
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    container_name: pehchaan_frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: always
+
   backend:
     build: ./backend
-    container_name: final_buddy_backend
+    container_name: pehchaan_backend
     ports:
       - "8000:8000"
-    env_file:
-      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: faces_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      QDRANT_URL: http://qdrant:6333
     depends_on:
       - postgres
       - qdrant
     volumes:
-      - ./backend:/app
       - ./final_images:/app/final_images
+      - ./user_uploads:/app/user_uploads
       - ./pehchaan:/app/pehchaan
-      - ./visual_embed:/app/visual_embed
     restart: always
 
   postgres:
     image: postgres:15
     platform: linux/amd64
-    container_name: final_buddy_postgres
+    container_name: pehchaan_postgres
     environment:
       POSTGRES_DB: faces_db
       POSTGRES_USER: postgres
@@ -29,11 +45,13 @@ services:
       - "5433:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data
+    restart: always
 
   qdrant:
     image: qdrant/qdrant
-    container_name: final_buddy_qdrant
+    container_name: pehchaan_qdrant
     ports:
       - "6333:6333"
     volumes:
       - ./qdrant_storage:/qdrant/storage
+    restart: always
