@@ -4,7 +4,7 @@ import {
   Upload, X, Shield, Lock, AlertCircle,
   CheckCircle, Clock, User, ChevronRight, Scan,
   Eye, ArrowRight, RefreshCw, Phone, Database,
-  Calendar, MapPin
+  Calendar, MapPin, Users
 } from 'lucide-react';
 import { toast } from 'sonner';
 import Navbar from '@/components/shared/Navbar';
@@ -166,6 +166,14 @@ export default function SearchPerson() {
                 Upload a photo to check for potential matches in our database.
                 All searches are encrypted and logged.
               </p>
+              {/* Scene search CTA */}
+              <div className="mt-6 inline-flex items-center gap-3 px-5 py-3 bg-blue-50 border border-blue-100 rounded-xl text-sm text-blue-700">
+                <Users className="w-4 h-4 flex-shrink-0" />
+                <span>Have a crowd photo or CCTV frame?</span>
+                <Link to="/search-scene" className="font-semibold underline underline-offset-2 hover:text-blue-900">
+                  Use Scene Search →
+                </Link>
+              </div>
             </div>
 
             {/* Upload Section */}

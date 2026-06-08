@@ -18,6 +18,7 @@ import DataUsage from '@/pages/DataUsage';
 import Contact from '@/pages/Contact';
 import Cases from '@/pages/Cases';
 import CaseDetails from '@/pages/CaseDetails';
+import SceneSearch from '@/pages/SceneSearch';
 import ProtectedRoute from '@/components/shared/ProtectedRoute';
 import ScrollToTop from '@/components/shared/ScrollToTop';
 
@@ -31,6 +32,7 @@ function App() {
         <Route path="/cases/:id" element={<CaseDetails />} />
         <Route path="/how-it-works" element={<HowItWorks />} />
         <Route path="/search" element={<SearchPerson />} />
+        <Route path="/search-scene" element={<SceneSearch />} />
         <Route path="/report" element={<ReportMissing />} />
         <Route path="/track" element={<TrackCase />} />
         <Route path="/login" element={<Login />} />
