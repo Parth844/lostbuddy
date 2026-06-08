@@ -13,7 +13,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 
 from db import qdrant, cursor, conn, QDRANT_COLLECTION
-from face import get_embedding
+from face import get_embedding, get_all_face_embeddings
 from qdrant_client.models import VectorParams, Distance
 
 # --- Auth Configuration ---
@@ -692,6 +692,76 @@ async def search_face(
     return {
         "success": True,
         "matches": matches
+    }
+
+
+# -------------------------
+# POST /search-scene
+# Multi-face scene search: detect ALL faces in image, search each against DB
+# -------------------------
+
+@app.post("/search-scene")
+async def search_scene(
+    file: UploadFile = File(...),
+    top: int = Query(3)
+):
+    img = load_image(file)
+    w, h = img.size
+    detected_faces = get_all_face_embeddings(img)
+
+    if not detected_faces:
+        return {"success": True, "image_width": w, "image_height": h, "faces": [], "message": "No faces detected in image"}
+
+    face_results = []
+
+    for face_data in detected_faces:
+        emb = face_data["embedding"]
+        bbox = face_data["bbox"]
+
+        results = qdrant.search(
+            collection_name=QDRANT_COLLECTION,
+            query_vector=emb.tolist(),
+            limit=top
+        )
+
+        matches = []
+        for r in results:
+            if r.score < 0.60:
+                continue
+
+            pid = r.payload.get("FinalPersonId")
+            cursor.execute(
+                "SELECT final_person_id, name, sex, birth_year, state, district, police_station, tracing_status, image_file FROM persons WHERE final_person_id = %s",
+                (pid,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                continue
+
+            matches.append({
+                "FinalPersonId": row[0],
+                "score": float(r.score),
+                "name": row[1],
+                "sex": row[2],
+                "birth_year": row[3],
+                "state": row[4],
+                "district": row[5],
+                "police_station": row[6],
+                "tracing_status": row[7],
+                "image_file": row[8],
+            })
+
+        face_results.append({
+            "face_index": face_data["face_index"],
+            "bbox": bbox,
+            "matches": matches,
+        })
+
+    return {
+        "success": True,
+        "image_width": w,
+        "image_height": h,
+        "faces": face_results,
     }
 
 

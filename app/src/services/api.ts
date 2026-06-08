@@ -537,4 +537,30 @@ export const getCaseTimeline = async (caseId: string): Promise<TimelineEvent[]> 
   return response.data.timeline;
 };
 
+// ==================== SCENE SEARCH ====================
+
+export interface SceneFaceMatch {
+  face_index: number;
+  bbox: [number, number, number, number]; // [x1, y1, x2, y2]
+  matches: SearchMatch[];
+}
+
+export interface SceneSearchResponse {
+  success: boolean;
+  image_width: number;
+  image_height: number;
+  faces: SceneFaceMatch[];
+  message?: string;
+}
+
+export const searchScene = async (file: File): Promise<SceneSearchResponse> => {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await api.post('/search-scene', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000,
+  });
+  return response.data;
+};
+
 export default api;
