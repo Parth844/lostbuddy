@@ -15,8 +15,13 @@ final class ChatViewModel: ObservableObject {
     @Published var isResponding = false
     @Published var errorText: String?
 
-    /// Selected model, persisted across launches.
-    @AppStorage("selectedModel") var modelRaw: String = ClaudeModel.opus48.rawValue
+    /// Selected model id, persisted across launches. Backed by UserDefaults;
+    /// `@Published` (not `@AppStorage`) so it works inside an ObservableObject.
+    @Published var modelRaw: String = UserDefaults.standard.string(forKey: Self.modelKey)
+        ?? ClaudeModel.opus48.rawValue {
+        didSet { UserDefaults.standard.set(modelRaw, forKey: Self.modelKey) }
+    }
+    private static let modelKey = "selectedModel"
 
     private var model: ClaudeModel { ClaudeModel(rawValue: modelRaw) ?? .opus48 }
     private var streamTask: Task<Void, Never>?
