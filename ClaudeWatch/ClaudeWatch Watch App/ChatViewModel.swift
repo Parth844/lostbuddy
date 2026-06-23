@@ -25,7 +25,14 @@ final class ChatViewModel: ObservableObject {
     private var model: ClaudeModel { ClaudeModel(rawValue: modelRaw) ?? .opus48 }
     private var streamTask: Task<Void, Never>?
 
-    var hasAPIKey: Bool { (KeychainHelper.loadAPIKey() ?? "").isEmpty == false }
+    /// The API key in effect: a hardcoded `Config` key wins if set, otherwise
+    /// the one stored in the Keychain (Settings screen).
+    private var resolvedAPIKey: String {
+        if !Config.hardcodedAPIKey.isEmpty { return Config.hardcodedAPIKey }
+        return KeychainHelper.loadAPIKey() ?? ""
+    }
+
+    var hasAPIKey: Bool { !resolvedAPIKey.isEmpty }
 
     /// Send the user's prompt and stream Claude's reply into the transcript.
     func send(_ prompt: String) {
@@ -35,7 +42,8 @@ final class ChatViewModel: ObservableObject {
         errorText = nil
         messages.append(ChatMessage(role: .user, text: trimmed))
 
-        guard let apiKey = KeychainHelper.loadAPIKey(), !apiKey.isEmpty else {
+        let apiKey = resolvedAPIKey
+        guard !apiKey.isEmpty else {
             errorText = AnthropicError.missingAPIKey.errorDescription
             return
         }
