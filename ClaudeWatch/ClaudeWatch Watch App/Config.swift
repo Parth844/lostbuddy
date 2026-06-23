@@ -12,7 +12,7 @@
 import Foundation
 
 enum Config {
-    /// Paste your Anthropic key here (looks like "sk-ant-...") to skip the
-    /// Settings screen. Leave it as "" to use the key entered in Settings.
+    /// Paste your OpenAI key here (looks like "sk-...") to skip the Settings
+    /// screen. Leave it as "" to use the key entered in Settings.
     static let hardcodedAPIKey = ""
 }

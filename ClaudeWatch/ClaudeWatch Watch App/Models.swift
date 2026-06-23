@@ -24,21 +24,21 @@ struct ChatMessage: Identifiable, Equatable {
     var isStreaming: Bool = false
 }
 
-/// The Claude models offered in Settings. Defaults to the most capable Opus
-/// tier; Haiku is offered for snappier, lower-cost replies on the watch.
+/// The OpenAI models offered in Settings. Defaults to GPT-4o mini for the
+/// cheapest, snappiest replies on the watch.
 enum ClaudeModel: String, CaseIterable, Identifiable {
-    case opus48   = "claude-opus-4-8"
-    case sonnet46 = "claude-sonnet-4-6"
-    case haiku45  = "claude-haiku-4-5"
+    case gpt4oMini = "gpt-4o-mini"
+    case gpt4o     = "gpt-4o"
+    case gpt4Turbo = "gpt-4-turbo"
 
     var id: String { rawValue }
 
     /// Short label shown in the Settings picker.
     var displayName: String {
         switch self {
-        case .opus48:   return "Opus 4.8"
-        case .sonnet46: return "Sonnet 4.6"
-        case .haiku45:  return "Haiku 4.5"
+        case .gpt4oMini: return "GPT-4o mini"
+        case .gpt4o:     return "GPT-4o"
+        case .gpt4Turbo: return "GPT-4 Turbo"
         }
     }
 }

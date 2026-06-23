@@ -18,11 +18,11 @@ final class ChatViewModel: ObservableObject {
     /// Selected model id, persisted across launches. Backed by UserDefaults;
     /// `@Published` (not `@AppStorage`) so it works inside an ObservableObject.
     @Published var modelRaw: String = UserDefaults.standard.string(forKey: "selectedModel")
-        ?? ClaudeModel.opus48.rawValue {
+        ?? ClaudeModel.gpt4oMini.rawValue {
         didSet { UserDefaults.standard.set(modelRaw, forKey: "selectedModel") }
     }
 
-    private var model: ClaudeModel { ClaudeModel(rawValue: modelRaw) ?? .opus48 }
+    private var model: ClaudeModel { ClaudeModel(rawValue: modelRaw) ?? .gpt4oMini }
     private var streamTask: Task<Void, Never>?
 
     /// The API key in effect: a hardcoded `Config` key wins if set, otherwise

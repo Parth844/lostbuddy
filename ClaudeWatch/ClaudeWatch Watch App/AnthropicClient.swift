@@ -2,12 +2,12 @@
 //  AnthropicClient.swift
 //  ClaudeWatch Watch App
 //
-//  Talks directly to the Anthropic Messages API over HTTPS. Swift has no
-//  official Anthropic SDK, so we hand-roll the request and parse the
+//  Talks directly to the OpenAI Chat Completions API over HTTPS and parses the
 //  Server-Sent Events (SSE) stream, surfacing text deltas as an async stream.
+//  (Type names kept as-is to minimize churn elsewhere in the project.)
 //
-//  Endpoint:  POST https://api.anthropic.com/v1/messages
-//  Docs:      https://platform.claude.com/docs/en/build-with-claude/streaming
+//  Endpoint:  POST https://api.openai.com/v1/chat/completions
+//  Docs:      https://platform.openai.com/docs/api-reference/chat/streaming
 //
 
 import Foundation
@@ -43,25 +43,27 @@ struct AnthropicClient {
         model: String,
         apiKey: String,
         maxTokens: Int = 1024,
-        system: String = "You are Claude, a helpful assistant answering from an Apple Watch. Keep replies concise and easy to read on a tiny screen."
+        system: String = "You are a helpful assistant answering from an Apple Watch. Keep replies concise and easy to read on a tiny screen."
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     guard !apiKey.isEmpty else { throw AnthropicError.missingAPIKey }
 
-                    var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+                    var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
                     request.httpMethod = "POST"
-                    request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-                    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-                    request.setValue("application/json", forHTTPHeaderField: "content-type")
+                    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+                    // OpenAI carries the system prompt as the first message.
+                    var wire: [[String: String]] = [["role": "system", "content": system]]
+                    wire += messages.map { ["role": $0.role, "content": $0.content] }
 
                     let body: [String: Any] = [
                         "model": model,
                         "max_tokens": maxTokens,
-                        "system": system,
                         "stream": true,
-                        "messages": messages.map { ["role": $0.role, "content": $0.content] },
+                        "messages": wire,
                     ]
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -71,29 +73,25 @@ struct AnthropicClient {
                         throw AnthropicError.decoding
                     }
                     guard (200...299).contains(http.statusCode) else {
-                        // Drain the body so we can show a useful error message.
                         var errBody = ""
                         for try await line in bytes.lines { errBody += line }
                         throw AnthropicError.http(status: http.statusCode, body: errBody)
                     }
 
-                    // Parse the SSE stream line by line. We only care about the
-                    // `data:` payloads carrying `content_block_delta` text.
+                    // Parse the SSE stream. OpenAI sends `data: {json}` lines and
+                    // a final `data: [DONE]`. Text lives at choices[0].delta.content.
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data:") else { continue }
                         let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                         if payload == "[DONE]" { break }
                         guard let data = payload.data(using: .utf8),
-                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                              let choices = json["choices"] as? [[String: Any]],
+                              let delta = choices.first?["delta"] as? [String: Any]
                         else { continue }
 
-                        let type = json["type"] as? String
-                        if type == "content_block_delta",
-                           let delta = json["delta"] as? [String: Any],
-                           let text = delta["text"] as? String {
+                        if let text = delta["content"] as? String, !text.isEmpty {
                             continuation.yield(text)
-                        } else if type == "message_stop" {
-                            break
                         }
                     }
                     continuation.finish()
@@ -102,7 +100,6 @@ struct AnthropicClient {
                 }
             }
 
-            // If the consumer cancels (view disappears), cancel the network task.
             continuation.onTermination = { _ in task.cancel() }
         }
     }
