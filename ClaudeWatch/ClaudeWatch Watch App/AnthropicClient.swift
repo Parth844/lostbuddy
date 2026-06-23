@@ -2,12 +2,12 @@
 //  AnthropicClient.swift
 //  ClaudeWatch Watch App
 //
-//  Talks directly to the OpenAI Chat Completions API over HTTPS and parses the
-//  Server-Sent Events (SSE) stream, surfacing text deltas as an async stream.
-//  (Type names kept as-is to minimize churn elsewhere in the project.)
+//  Talks directly to the NVIDIA NIM chat completions API (OpenAI-compatible)
+//  over HTTPS and parses the Server-Sent Events (SSE) stream, surfacing text
+//  deltas as an async stream. (Type names kept as-is to minimize churn.)
 //
-//  Endpoint:  POST https://api.openai.com/v1/chat/completions
-//  Docs:      https://platform.openai.com/docs/api-reference/chat/streaming
+//  Endpoint:  POST https://integrate.api.nvidia.com/v1/chat/completions
+//  Auth:      Authorization: Bearer nvapi-...
 //
 
 import Foundation
@@ -50,19 +50,24 @@ struct AnthropicClient {
                 do {
                     guard !apiKey.isEmpty else { throw AnthropicError.missingAPIKey }
 
-                    var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+                    var request = URLRequest(url: URL(string: "https://integrate.api.nvidia.com/v1/chat/completions")!)
                     request.httpMethod = "POST"
                     request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
-                    // OpenAI carries the system prompt as the first message.
+                    // OpenAI-style message list; system prompt goes first.
                     var wire: [[String: String]] = [["role": "system", "content": system]]
                     wire += messages.map { ["role": $0.role, "content": $0.content] }
 
                     let body: [String: Any] = [
                         "model": model,
                         "max_tokens": maxTokens,
+                        "temperature": 1.0,
+                        "top_p": 1.0,
                         "stream": true,
+                        // kimi-k2.6 supports a "thinking" toggle; harmless to keep.
+                        "chat_template_kwargs": ["thinking": true],
                         "messages": wire,
                     ]
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -78,8 +83,8 @@ struct AnthropicClient {
                         throw AnthropicError.http(status: http.statusCode, body: errBody)
                     }
 
-                    // Parse the SSE stream. OpenAI sends `data: {json}` lines and
-                    // a final `data: [DONE]`. Text lives at choices[0].delta.content.
+                    // SSE: `data: {json}` lines, final `data: [DONE]`.
+                    // Text lives at choices[0].delta.content.
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data:") else { continue }
                         let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)

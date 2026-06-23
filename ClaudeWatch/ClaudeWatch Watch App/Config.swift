@@ -12,7 +12,8 @@
 import Foundation
 
 enum Config {
-    /// Paste your OpenAI key here (looks like "sk-...") to skip the Settings
+    /// Paste your NVIDIA key here (looks like "nvapi-...") to skip the Settings
     /// screen. Leave it as "" to use the key entered in Settings.
+    /// NOTE: do not commit a real key to a public repo.
     static let hardcodedAPIKey = ""
 }

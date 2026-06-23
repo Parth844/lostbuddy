@@ -24,21 +24,18 @@ struct ChatMessage: Identifiable, Equatable {
     var isStreaming: Bool = false
 }
 
-/// The OpenAI models offered in Settings. Defaults to GPT-4o mini for the
-/// cheapest, snappiest replies on the watch.
+/// The NVIDIA-hosted models offered in Settings.
 enum ClaudeModel: String, CaseIterable, Identifiable {
-    case gpt4oMini = "gpt-4o-mini"
-    case gpt4o     = "gpt-4o"
-    case gpt4Turbo = "gpt-4-turbo"
+    case kimiK2  = "moonshotai/kimi-k2.6"
+    case llama33 = "meta/llama-3.3-70b-instruct"
 
     var id: String { rawValue }
 
     /// Short label shown in the Settings picker.
     var displayName: String {
         switch self {
-        case .gpt4oMini: return "GPT-4o mini"
-        case .gpt4o:     return "GPT-4o"
-        case .gpt4Turbo: return "GPT-4 Turbo"
+        case .kimiK2:  return "Kimi K2.6"
+        case .llama33: return "Llama 3.3 70B"
         }
     }
 }
