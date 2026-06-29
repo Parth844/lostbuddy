@@ -13,11 +13,18 @@ dist/
 backend/datasets_csv/
 *.csv
 *.json
+# ...but never ignore essential frontend/tooling manifests
+!app/package.json
+!app/package-lock.json
+!app/tsconfig.json
+!app/tsconfig.node.json
+!app/components.json
 
 # Docker volumes
 pgdata/
 qdrant_storage/
 final_images/
+user_uploads/
 
 # OS
 .DS_Store
