@@ -264,6 +264,12 @@ export default function TrackCase() {
                                 <p className="text-sm mt-1 text-gray-600">
                                   {item.description}
                                 </p>
+                                {item.actor_role && (
+                                  <p className="text-xs mt-1 text-slate-400">
+                                    By {item.actor_name || item.actor_role}
+                                    {item.actor_name && ` (${item.actor_role})`}
+                                  </p>
+                                )}
                               </div>
                               <span className="text-sm whitespace-nowrap text-gray-500">
                                 {item.date}

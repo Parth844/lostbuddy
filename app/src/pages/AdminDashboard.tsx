@@ -593,7 +593,13 @@ export default function AdminDashboard() {
                           <div className="flex-1 text-center">
                             <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Submitted Evidence</p>
                             <div className="relative w-40 h-40 mx-auto rounded-xl overflow-hidden border-2 border-amber-200">
-                              <img src={`/user-uploads/${match.submitted_image}`} className="w-full h-full object-cover" alt="Submitted" />
+                              {match.submitted_image ? (
+                                <img src={`/user-uploads/${match.submitted_image}`} className="w-full h-full object-cover" alt="Submitted" />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center bg-amber-50 px-3 text-xs font-semibold text-amber-700">
+                                  Police match request — no new photo
+                                </div>
+                              )}
                             </div>
                             <p className="mt-2 text-sm text-slate-500">Submitted just now</p>
                           </div>

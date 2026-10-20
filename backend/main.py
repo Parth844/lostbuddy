@@ -16,7 +16,7 @@ from jose import JWTError, jwt
 
 from db import qdrant, get_cursor, ping as db_ping, QDRANT_COLLECTION
 from face import get_embedding, get_primary_face, get_all_face_embeddings
-from qdrant_client.models import VectorParams, Distance
+from qdrant_client.models import VectorParams, Distance, SearchRequest
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -45,6 +45,13 @@ oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=
 
 # --- Upload validation ---
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+
+# --- Matching thresholds (tune per deployment; calibrate with eval_accuracy.py) ---
+MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.60"))            # min cosine to show a result
+ESCALATION_THRESHOLD = float(os.environ.get("ESCALATION_THRESHOLD", "0.75"))  # auto-alert police
+REPORT_MATCH_THRESHOLD = float(os.environ.get("REPORT_MATCH_THRESHOLD", "0.65"))  # new report vs existing
+RERANK_BOOST = float(os.environ.get("RERANK_BOOST", "0.03"))                  # per agreeing metadata field
+ESCALATION_DEDUP_HOURS = int(os.environ.get("ESCALATION_DEDUP_HOURS", "24"))
 
 
 # --- Auth Models ---
@@ -111,6 +118,7 @@ def init_db():
                 title VARCHAR(255),
                 description TEXT,
                 status VARCHAR(50),
+                actor_id INTEGER,
                 event_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -130,6 +138,8 @@ def init_db():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image VARCHAR(255)",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE",
         "ALTER TABLE persons ADD COLUMN IF NOT EXISTS reporter_id INTEGER",
+        "ALTER TABLE case_timeline ADD COLUMN IF NOT EXISTS actor_id INTEGER",
+        "ALTER TABLE potential_matches ADD COLUMN IF NOT EXISTS requested_by INTEGER",
         "ALTER TABLE persons ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
         # Indexes on common filter columns (Phase 2) — avoid full table scans as data grows
         "CREATE INDEX IF NOT EXISTS idx_persons_state ON persons (state)",
@@ -200,15 +210,23 @@ def seed_admin():
     with get_cursor(commit=True) as cursor:
         cursor.execute("SELECT * FROM users WHERE role = 'admin'")
         if not cursor.fetchone():
-            hashed_password = get_password_hash("admin123")
+            admin_email = os.environ.get("ADMIN_EMAIL", "admin@pehchaan.com")
+            admin_password = os.environ.get("ADMIN_PASSWORD")
+            if not admin_password:
+                admin_password = "admin123"
+                logger.warning(
+                    "ADMIN_PASSWORD not set — seeding admin with the insecure development "
+                    "default. Set ADMIN_PASSWORD for any non-local deployment."
+                )
+            hashed_password = get_password_hash(admin_password)
             cursor.execute(
                 """
                 INSERT INTO users (email, password_hash, first_name, last_name, phone, role, is_verified)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                ("admin@pehchaan.com", hashed_password, "System", "Admin", "0000000000", "admin", True)
+                (admin_email, hashed_password, "System", "Admin", "0000000000", "admin", True)
             )
-            logger.info("Seeded Admin User: admin@pehchaan.com / admin123")
+            logger.info("Seeded admin user: %s", admin_email)
 
 seed_admin()
 
@@ -514,7 +532,7 @@ CORS_ORIGINS = [
     o.strip()
     for o in os.environ.get(
         "CORS_ORIGINS",
-        "http://localhost:5173,https://jhku5paqt5rcq.ok.kimi.link",
+        "http://localhost:5173",
     ).split(",")
     if o.strip()
 ]
@@ -594,6 +612,54 @@ def notify_police_admins(cursor, title: str, message: str, notif_type: str = "ma
             """,
             (p_id, title, message, notif_type)
         )
+
+
+def add_timeline_event(cursor, case_id: str, title: str, description: str, status: str, actor_id=None):
+    """Append a case timeline event, recording which user (if any) caused it."""
+    cursor.execute(
+        """
+        INSERT INTO case_timeline (case_id, title, description, status, actor_id)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (case_id, title, description, status, actor_id)
+    )
+
+
+def escalate_if_high_confidence(cursor, row, score: float, source: str, actor_id=None):
+    """Alert police on a high-confidence search hit, at most once per case per
+    ESCALATION_DEDUP_HOURS window. row is (final_person_id, name, ..., tracing_status at [7])."""
+    if score <= ESCALATION_THRESHOLD or row[7] in ("matched", "closed"):
+        return
+    cursor.execute(
+        """
+        SELECT 1 FROM case_timeline
+        WHERE case_id = %s AND title = 'Potential Match Detected'
+          AND event_date > NOW() - make_interval(hours => %s)
+        LIMIT 1
+        """,
+        (row[0], ESCALATION_DEDUP_HOURS)
+    )
+    if cursor.fetchone():
+        return
+    add_timeline_event(
+        cursor, row[0], "Potential Match Detected",
+        f"A high-confidence match was found during a {source}.", "under-review", actor_id,
+    )
+    notify_police_admins(
+        cursor,
+        "Search Match Alert",
+        f"High confidence match ({int(score*100)}%) found for case {row[1]} during a {source}.",
+    )
+
+
+def rerank_score(score: float, row, sex, state) -> float:
+    """Cosine stays primary; small boosts when gender/state agree. row[2]=sex, row[4]=state."""
+    rerank = score
+    if sex and row[2] and sex.strip().lower() == row[2].strip().lower():
+        rerank += RERANK_BOOST
+    if state and row[4] and state.strip().upper() == row[4].strip().upper():
+        rerank += RERANK_BOOST
+    return round(rerank, 4)
 
 
 # -------------------------
@@ -703,9 +769,10 @@ async def search_face(
     request: Request,
     file: UploadFile = File(...),
     top: int = Query(5),
-    threshold: float = Query(0.60, ge=0.0, le=1.0),
+    threshold: float = Query(MATCH_THRESHOLD, ge=0.0, le=1.0),
     sex: str | None = Query(None),
     state: str | None = Query(None),
+    current_user = Depends(get_current_user),
 ):
     await validate_upload(file)
     img = load_image(file)
@@ -749,35 +816,12 @@ async def search_face(
             if not row:
                 continue
 
-            # Automation: high-confidence match → timeline + notify police (once per match)
-            if score > 0.75 and row[7] not in ['matched', 'closed']:
-                cursor.execute(
-                    """
-                    INSERT INTO case_timeline (case_id, title, description, status)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (pid, "Potential Match Detected",
-                     "A high-confidence match was found during a public search.", "under-review")
-                )
-                notify_police_admins(
-                    cursor,
-                    "Search Match Alert",
-                    f"High confidence match ({int(score*100)}%) found for case {row[1]} during public search.",
-                )
-
-            # Metadata-aware re-rank: cosine stays primary, but small boosts for
-            # matching gender/state nudge the truer candidates up and reduce
-            # superficial false positives. Original cosine `score` is preserved.
-            rerank = score
-            if sex and row[2] and sex.strip().lower() == row[2].strip().lower():
-                rerank += 0.03
-            if state and row[4] and state.strip().upper() == row[4].strip().upper():
-                rerank += 0.03
+            escalate_if_high_confidence(cursor, row, score, "photo search", current_user[0])
 
             matches.append({
                 "FinalPersonId": row[0],
                 "score": score,
-                "rerank_score": round(rerank, 4),
+                "rerank_score": rerank_score(score, row, sex, state),
                 "name": row[1],
                 "sex": row[2],
                 "birth_year": row[3],
@@ -801,7 +845,10 @@ async def search_scene(
     request: Request,
     file: UploadFile = File(...),
     top: int = Query(3),
-    threshold: float = Query(0.60, ge=0.0, le=1.0),
+    threshold: float = Query(MATCH_THRESHOLD, ge=0.0, le=1.0),
+    sex: str | None = Query(None),
+    state: str | None = Query(None),
+    current_user = Depends(get_current_user),
 ):
     await validate_upload(file)
     img = load_image(file)
@@ -812,14 +859,17 @@ async def search_scene(
         return {"success": True, "image_width": w, "image_height": h, "faces": [], "message": "No faces detected in image"}
 
     # Search every face, collect all PIDs, then fetch metadata in one query
+    # One Qdrant round-trip for all faces, then one Postgres query for all candidates
+    batch_results = qdrant.search_batch(
+        collection_name=QDRANT_COLLECTION,
+        requests=[
+            SearchRequest(vector=f["embedding"].tolist(), limit=top, with_payload=True)
+            for f in detected_faces
+        ],
+    )
     per_face = []
     all_pids = set()
-    for face_data in detected_faces:
-        results = qdrant.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=face_data["embedding"].tolist(),
-            limit=top
-        )
+    for face_data, results in zip(detected_faces, batch_results):
         kept = [(r.payload.get("FinalPersonId"), float(r.score)) for r in results if r.score >= threshold]
         all_pids.update(pid for pid, _ in kept)
         per_face.append((face_data, kept))
@@ -838,29 +888,33 @@ async def search_scene(
             by_pid = {row[0]: row for row in cursor.fetchall()}
 
     face_results = []
-    for face_data, kept in per_face:
-        matches = []
-        for pid, score in kept:
-            row = by_pid.get(pid)
-            if not row:
-                continue
-            matches.append({
-                "FinalPersonId": row[0],
-                "score": score,
-                "name": row[1],
-                "sex": row[2],
-                "birth_year": row[3],
-                "state": row[4],
-                "district": row[5],
-                "police_station": row[6],
-                "tracing_status": row[7],
-                "image_file": row[8],
+    with get_cursor(commit=True) as cursor:
+        for face_data, kept in per_face:
+            matches = []
+            for pid, score in kept:
+                row = by_pid.get(pid)
+                if not row:
+                    continue
+                escalate_if_high_confidence(cursor, row, score, "scene search", current_user[0])
+                matches.append({
+                    "FinalPersonId": row[0],
+                    "score": score,
+                    "rerank_score": rerank_score(score, row, sex, state),
+                    "name": row[1],
+                    "sex": row[2],
+                    "birth_year": row[3],
+                    "state": row[4],
+                    "district": row[5],
+                    "police_station": row[6],
+                    "tracing_status": row[7],
+                    "image_file": row[8],
+                })
+            matches.sort(key=lambda m: m["rerank_score"], reverse=True)
+            face_results.append({
+                "face_index": face_data["face_index"],
+                "bbox": face_data["bbox"],
+                "matches": matches,
             })
-        face_results.append({
-            "face_index": face_data["face_index"],
-            "bbox": face_data["bbox"],
-            "matches": matches,
-        })
 
     return {
         "success": True,
@@ -928,20 +982,16 @@ async def flag_potential_match(
                 raise HTTPException(status_code=404, detail="Case not found")
             person_name = person[0]
 
-            cursor.execute(
-                """
-                INSERT INTO case_timeline (case_id, title, description, status)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (case_id, "Potential Match Flagged",
-                 f"User #{current_user[0]} flagged a potential match with photo evidence.", "under-review")
+            add_timeline_event(
+                cursor, case_id, "Potential Match Flagged",
+                "A user flagged a potential match with photo evidence.", "under-review", current_user[0],
             )
             cursor.execute(
                 """
-                INSERT INTO potential_matches (case_id, submitted_image, status)
-                VALUES (%s, %s, 'pending')
+                INSERT INTO potential_matches (case_id, submitted_image, status, requested_by)
+                VALUES (%s, %s, 'pending', %s)
                 """,
-                (case_id, filename)
+                (case_id, filename, current_user[0])
             )
             notify_police_admins(
                 cursor,
@@ -994,21 +1044,20 @@ def get_potential_matches(current_user = Depends(check_admin_role)):
 @app.post("/admin/matches/{match_id}/confirm")
 def confirm_match(match_id: int, current_user = Depends(check_admin_role)):
     with get_cursor(commit=True) as cursor:
-        cursor.execute("SELECT case_id, submitted_image FROM potential_matches WHERE id = %s", (match_id,))
+        cursor.execute("SELECT case_id, submitted_image, status FROM potential_matches WHERE id = %s", (match_id,))
         match = cursor.fetchone()
         if not match:
             raise HTTPException(status_code=404, detail="Match not found")
+        if match[2] != 'pending':
+            raise HTTPException(status_code=400, detail=f"Match already {match[2]}")
 
         case_id = match[0]
 
         cursor.execute("UPDATE potential_matches SET status = 'confirmed' WHERE id = %s", (match_id,))
         cursor.execute("UPDATE persons SET tracing_status = 'matched' WHERE final_person_id = %s", (case_id,))
-        cursor.execute(
-            """
-            INSERT INTO case_timeline (case_id, title, description, status)
-            VALUES (%s, %s, %s, 'matched')
-            """,
-            (case_id, "Match Confirmed", "Administrative review confirmed the potential match.",)
+        add_timeline_event(
+            cursor, case_id, "Match Confirmed",
+            "Administrative review confirmed the potential match.", "matched", current_user[0],
         )
 
         cursor.execute("SELECT reporter_id, name FROM persons WHERE final_person_id = %s", (case_id,))
@@ -1070,7 +1119,7 @@ async def report_missing(
         limit=5
     )
     match_found = any(
-        r.score > 0.65 and r.payload.get("FinalPersonId") != final_person_id
+        r.score > REPORT_MATCH_THRESHOLD and r.payload.get("FinalPersonId") != final_person_id
         for r in search_results
     )
 
@@ -1091,12 +1140,9 @@ async def report_missing(
                     "submitted", filename, current_user[0]
                 ),
             )
-            cursor.execute(
-                """
-                INSERT INTO case_timeline (case_id, title, description, status)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (final_person_id, "Case Submitted", "Report has been submitted and is pending verification.", "submitted")
+            add_timeline_event(
+                cursor, final_person_id, "Case Submitted",
+                "Report has been submitted and is pending verification.", "submitted", current_user[0],
             )
             if match_found:
                 notify_police_admins(
@@ -1340,11 +1386,56 @@ def update_case_status(
 
     new_status = status_update.status
 
+    # A case can only become 'matched' through admin review of a pending
+    # potential match (/admin/matches/{id}/confirm). A request here to mark a
+    # match opens that review instead of changing the status directly.
+    if new_status in ('matched', 'match-confirmed'):
+        with get_cursor(commit=True) as cursor:
+            cursor.execute(
+                "SELECT name, image_file, tracing_status FROM persons WHERE final_person_id = %s",
+                (case_id,)
+            )
+            case_row = cursor.fetchone()
+            if not case_row:
+                raise HTTPException(status_code=404, detail="Case not found")
+            if case_row[2] in ('matched', 'closed'):
+                raise HTTPException(status_code=400, detail=f"Case is already {case_row[2]}")
+            cursor.execute(
+                "SELECT 1 FROM potential_matches WHERE case_id = %s AND status = 'pending' AND requested_by = %s",
+                (case_id, current_user[0])
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    """
+                    INSERT INTO potential_matches (case_id, submitted_image, status, requested_by)
+                    VALUES (%s, %s, 'pending', %s)
+                    """,
+                    (case_id, None, current_user[0])  # no new photo: police judgement
+                )
+                cursor.execute(
+                    "UPDATE persons SET tracing_status = 'under-review' WHERE final_person_id = %s",
+                    (case_id,)
+                )
+                add_timeline_event(
+                    cursor, case_id, "Match Review Requested",
+                    "Police requested admin confirmation of a match.", "under-review", current_user[0],
+                )
+                cursor.execute("SELECT id FROM users WHERE role = 'admin'")
+                for (admin_id,) in cursor.fetchall():
+                    cursor.execute(
+                        """
+                        INSERT INTO notifications (user_id, title, message, type)
+                        VALUES (%s, %s, %s, 'match')
+                        """,
+                        (admin_id, "Match Review Requested",
+                         f"Police requested confirmation of a match for {case_row[0]}.")
+                    )
+        return {"success": True, "pending_review": True,
+                "message": "Match submitted for admin confirmation."}
+
     db_status = new_status
     if new_status == 'rejected':
         db_status = 'closed'
-    elif new_status == 'match-confirmed':
-        db_status = 'matched'
 
     with get_cursor(commit=True) as cursor:
         cursor.execute("SELECT reporter_id, name FROM persons WHERE final_person_id = %s", (case_id,))
@@ -1365,11 +1456,7 @@ def update_case_status(
             message = f"Status updated to '{new_status}' for missing person: {person_name}"
             notif_type = "update"
 
-            if new_status == 'matched':
-                title = "Match Confirmed"
-                message = f"Great news! A match has been confirmed for {person_name}."
-                notif_type = "match"
-            elif new_status == 'rejected':
+            if new_status == 'rejected':
                 title = "Case Closed"
                 notif_type = "alert"
 
@@ -1389,20 +1476,11 @@ def update_case_status(
         elif new_status == 'rejected':
             timeline_title = "Case Closed (Rejected)"
             timeline_desc = "Case has been rejected and closed."
-        elif new_status == 'matched':
-            timeline_title = "Match Confirmed"
-            timeline_desc = "A match has been confirmed. Police are coordinating."
         elif new_status == 'closed':
             timeline_title = "Case Closed"
             timeline_desc = "Case has been resolved and closed."
 
-        cursor.execute(
-            """
-            INSERT INTO case_timeline (case_id, title, description, status)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (case_id, timeline_title, timeline_desc, db_status)
-        )
+        add_timeline_event(cursor, case_id, timeline_title, timeline_desc, db_status, current_user[0])
 
     return {"success": True}
 
@@ -1411,10 +1489,13 @@ def get_case_timeline(case_id: str):
     with get_cursor() as cursor:
         cursor.execute(
             """
-            SELECT title, description, status, to_char(event_date, 'DD Mon YYYY, HH:MI AM')
-            FROM case_timeline
-            WHERE case_id = %s
-            ORDER BY event_date DESC
+            SELECT t.title, t.description, t.status,
+                   to_char(t.event_date, 'DD Mon YYYY, HH:MI AM'),
+                   u.role, TRIM(CONCAT(u.first_name, ' ', u.last_name))
+            FROM case_timeline t
+            LEFT JOIN users u ON u.id = t.actor_id
+            WHERE t.case_id = %s
+            ORDER BY t.event_date DESC
             """,
             (case_id,)
         )
@@ -1427,7 +1508,10 @@ def get_case_timeline(case_id: str):
                 "title": r[0],
                 "description": r[1],
                 "status": r[2],
-                "date": r[3]
+                "date": r[3],
+                # Citizens are shown by role only; police/admin by name for accountability
+                "actor_role": r[4],
+                "actor_name": r[5] if r[4] in ('police', 'admin') else None,
             }
             for r in rows
         ]

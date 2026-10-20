@@ -132,7 +132,7 @@ export default function PoliceDashboard() {
   const handleConfirmMatch = async (caseId: string) => {
     try {
       await updateCaseStatus(caseId, 'match-confirmed');
-      toast.success(`Match confirmed for case ${caseId}`);
+      toast.success(`Match for case ${caseId} sent to admin for confirmation`);
       setShowCaseDialog(false);
       fetchCases();
     } catch (e) {
@@ -601,7 +601,7 @@ export default function PoliceDashboard() {
                       onClick={() => handleConfirmMatch(selectedCase.case_id)}
                     >
                       <CheckCircle className="w-4 h-4 mr-2" />
-                      Confirm Match
+                      Request Match Confirmation
                     </Button>
                     <Button
                       variant="outline"

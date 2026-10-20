@@ -27,6 +27,15 @@ services:
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-300}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@pehchaan.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      FACE_MODEL: ${FACE_MODEL:-buffalo_s}
+      FACE_CTX_ID: ${FACE_CTX_ID:--1}
+      FACE_DET_SIZE: ${FACE_DET_SIZE:-640}
+      MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.60}
+      ESCALATION_THRESHOLD: ${ESCALATION_THRESHOLD:-0.75}
+      REPORT_MATCH_THRESHOLD: ${REPORT_MATCH_THRESHOLD:-0.65}
+      RERANK_BOOST: ${RERANK_BOOST:-0.03}
     depends_on:
       - postgres
       - qdrant
