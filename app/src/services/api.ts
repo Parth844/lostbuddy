@@ -275,7 +275,7 @@ export const flagPotentialMatch = async (caseId: string, file: File): Promise<{ 
 export interface MatchReview {
   id: number;
   case_id: string;
-  submitted_image: string;
+  submitted_image: string | null;
   status: string;
   created_at: string;
   case_name: string;
@@ -530,6 +530,8 @@ export interface TimelineEvent {
   description: string;
   status: string;
   date: string;
+  actor_role: string | null;
+  actor_name: string | null;
 }
 
 export const getCaseTimeline = async (caseId: string): Promise<TimelineEvent[]> => {

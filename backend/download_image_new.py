@@ -22,7 +22,7 @@ PROGRESS_CSV = "progress_checkpoint.csv"
 IMAGE_DIR = "final_images"
 BASE_IMAGE_URL = "https://zipnet.delhipolice.gov.in"
 
-MODEL_NAME = "buffalo_s"
+MODEL_NAME = os.environ.get("FACE_MODEL", "buffalo_s")
    # fastest for face detection
 MAX_WORKERS = 8
 IMAGE_TIMEOUT = 10
@@ -40,7 +40,10 @@ os.makedirs(IMAGE_DIR, exist_ok=True)
 # INIT INSIGHTFACE
 # ======================
 app = FaceAnalysis(name=MODEL_NAME)
-app.prepare(ctx_id=-1, det_size=(640, 640))
+app.prepare(
+    ctx_id=int(os.environ.get("FACE_CTX_ID", "-1")),
+    det_size=(int(os.environ.get("FACE_DET_SIZE", "640")),) * 2,
+)
 
 # ======================
 # HELPERS

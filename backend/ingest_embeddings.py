@@ -26,14 +26,17 @@ POSTGRES_CONFIG = {
     "port": 5432,
 }
 
-MODEL_NAME = "buffalo_s"   # stable + fast
+MODEL_NAME = os.environ.get("FACE_MODEL", "buffalo_s")   # stable + fast
 VECTOR_SIZE = 512
 
 # ======================
 # INIT INSIGHTFACE
 # ======================
 app = FaceAnalysis(name=MODEL_NAME)
-app.prepare(ctx_id=-1, det_size=(640, 640))
+app.prepare(
+    ctx_id=int(os.environ.get("FACE_CTX_ID", "-1")),
+    det_size=(int(os.environ.get("FACE_DET_SIZE", "640")),) * 2,
+)
 
 # ======================
 # INIT QDRANT

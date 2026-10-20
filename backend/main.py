@@ -1,32 +1,60 @@
-from fastapi import FastAPI, UploadFile, File, Query, Form, HTTPException, Depends, status
+from fastapi import FastAPI, UploadFile, File, Query, Form, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from PIL import Image
 import numpy as np
 import uuid
 import os
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 
-from db import qdrant, cursor, conn, QDRANT_COLLECTION
-from face import get_embedding, get_all_face_embeddings
-from qdrant_client.models import VectorParams, Distance
+from db import qdrant, get_cursor, ping as db_ping, QDRANT_COLLECTION
+from face import get_embedding, get_primary_face, get_all_face_embeddings
+from qdrant_client.models import VectorParams, Distance, SearchRequest
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+# --- Logging ---
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("pehchaan")
 
 # --- Auth Configuration ---
-SECRET_KEY = "your-secret-key-keep-it-secret"  # In production, use env var
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    SECRET_KEY = "dev-insecure-secret-change-me"
+    logger.warning(
+        "SECRET_KEY not set in environment — using an insecure development "
+        "default. Set SECRET_KEY for any non-local deployment."
+    )
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 300
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "300"))
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
 
+# --- Upload validation ---
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+
+# --- Matching thresholds (tune per deployment; calibrate with eval_accuracy.py) ---
+MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.60"))            # min cosine to show a result
+ESCALATION_THRESHOLD = float(os.environ.get("ESCALATION_THRESHOLD", "0.75"))  # auto-alert police
+REPORT_MATCH_THRESHOLD = float(os.environ.get("REPORT_MATCH_THRESHOLD", "0.65"))  # new report vs existing
+RERANK_BOOST = float(os.environ.get("RERANK_BOOST", "0.03"))                  # per agreeing metadata field
+ESCALATION_DEDUP_HOURS = int(os.environ.get("ESCALATION_DEDUP_HOURS", "24"))
+
+
 # --- Auth Models ---
-# UserCreate is now handled via Form parameters manually in the endpoint due to file upload
 class UserLogin(BaseModel):
     email: str
     password: str
@@ -42,86 +70,105 @@ class TokenData(BaseModel):
 
 # --- database Init ---
 def init_db():
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            email VARCHAR(255) UNIQUE NOT NULL,
-            password_hash VARCHAR(255) NOT NULL,
-            first_name VARCHAR(100),
-            last_name VARCHAR(100),
-            phone VARCHAR(20),
-            role VARCHAR(20) DEFAULT 'citizen',
-            profile_image VARCHAR(255),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS persons (
-            id SERIAL PRIMARY KEY,
-            final_person_id VARCHAR(255) UNIQUE NOT NULL,
-            name VARCHAR(255),
-            sex VARCHAR(10),
-            birth_year INTEGER,
-            state VARCHAR(100),
-            district VARCHAR(100),
-            police_station VARCHAR(100),
-            tracing_status VARCHAR(50),
-            image_file VARCHAR(255),
-            reporter_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS notifications (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER REFERENCES users(id),
-            title VARCHAR(255),
-            message TEXT,
-            type VARCHAR(50),
-            is_read BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS case_timeline (
-            id SERIAL PRIMARY KEY,
-            case_id VARCHAR(255),
-            title VARCHAR(255),
-            description TEXT,
-            status VARCHAR(50),
-            event_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS potential_matches (
-            id SERIAL PRIMARY KEY,
-            case_id VARCHAR(255),
-            submitted_image VARCHAR(255),
-            score FLOAT,
-            status VARCHAR(50) DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
+    with get_cursor(commit=True) as cursor:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                first_name VARCHAR(100),
+                last_name VARCHAR(100),
+                phone VARCHAR(20),
+                role VARCHAR(20) DEFAULT 'citizen',
+                profile_image VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS persons (
+                id SERIAL PRIMARY KEY,
+                final_person_id VARCHAR(255) UNIQUE NOT NULL,
+                name VARCHAR(255),
+                sex VARCHAR(10),
+                birth_year INTEGER,
+                state VARCHAR(100),
+                district VARCHAR(100),
+                police_station VARCHAR(100),
+                tracing_status VARCHAR(50),
+                image_file VARCHAR(255),
+                reporter_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
+                title VARCHAR(255),
+                message TEXT,
+                type VARCHAR(50),
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS case_timeline (
+                id SERIAL PRIMARY KEY,
+                case_id VARCHAR(255),
+                title VARCHAR(255),
+                description TEXT,
+                status VARCHAR(50),
+                actor_id INTEGER,
+                event_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS potential_matches (
+                id SERIAL PRIMARY KEY,
+                case_id VARCHAR(255),
+                submitted_image VARCHAR(255),
+                score FLOAT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
     # Run each migration independently so one failure doesn't roll back others
     for migration in [
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image VARCHAR(255)",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE",
         "ALTER TABLE persons ADD COLUMN IF NOT EXISTS reporter_id INTEGER",
+        "ALTER TABLE case_timeline ADD COLUMN IF NOT EXISTS actor_id INTEGER",
+        "ALTER TABLE potential_matches ADD COLUMN IF NOT EXISTS requested_by INTEGER",
         "ALTER TABLE persons ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        # Indexes on common filter columns (Phase 2) — avoid full table scans as data grows
+        "CREATE INDEX IF NOT EXISTS idx_persons_state ON persons (state)",
+        "CREATE INDEX IF NOT EXISTS idx_persons_tracing_status ON persons (tracing_status)",
+        "CREATE INDEX IF NOT EXISTS idx_persons_reporter_id ON persons (reporter_id)",
+        "CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_case_timeline_case_id ON case_timeline (case_id)",
     ]:
         try:
-            cursor.execute(migration)
-            conn.commit()
+            with get_cursor(commit=True) as cursor:
+                cursor.execute(migration)
         except Exception:
-            conn.rollback()
+            logger.exception("Migration failed: %s", migration)
 
     try:
-        cursor.execute("UPDATE users SET is_verified = TRUE WHERE role != 'police'")
-        conn.commit()
+        with get_cursor(commit=True) as cursor:
+            cursor.execute("UPDATE users SET is_verified = TRUE WHERE role != 'police'")
     except Exception:
-        conn.rollback()
+        logger.exception("Backfill is_verified failed")
+
+    # Normalize legacy tracing_status values to the canonical set used by the
+    # frontend (submitted/verified/under-review/matched/closed). Without this,
+    # status filtering silently returns nothing for migrated rows.
+    try:
+        with get_cursor(commit=True) as cursor:
+            cursor.execute("UPDATE persons SET tracing_status = 'submitted' WHERE tracing_status IN ('missing', 'Untraced')")
+            cursor.execute("UPDATE persons SET tracing_status = 'matched' WHERE tracing_status = 'Traced'")
+    except Exception:
+        logger.exception("Normalize tracing_status failed")
 
     # Ensure Qdrant collection exists
     existing = [c.name for c in qdrant.get_collections().collections]
@@ -130,12 +177,17 @@ def init_db():
             collection_name=QDRANT_COLLECTION,
             vectors_config=VectorParams(size=512, distance=Distance.COSINE)
         )
-        print(f"✅ Qdrant collection '{QDRANT_COLLECTION}' created")
+        logger.info("Qdrant collection '%s' created", QDRANT_COLLECTION)
 
 init_db()
 
 # ✅ Create app ONLY ONCE
 app = FastAPI(title="LostBuddy Face Search API")
+
+# --- Rate limiting (abuse / DoS protection) ---
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # --- Auth Utils ---
 def verify_password(plain_password, hashed_password):
@@ -149,24 +201,32 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
 def seed_admin():
-    cursor.execute("SELECT * FROM users WHERE role = 'admin'")
-    if not cursor.fetchone():
-        hashed_password = get_password_hash("admin123")
-        cursor.execute(
-            """
-            INSERT INTO users (email, password_hash, first_name, last_name, phone, role, is_verified)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            ("admin@pehchaan.com", hashed_password, "System", "Admin", "0000000000", "admin", True)
-        )
-        conn.commit()
-        print("✅ Seeded Admin User: admin@pehchaan.com / admin123")
+    with get_cursor(commit=True) as cursor:
+        cursor.execute("SELECT * FROM users WHERE role = 'admin'")
+        if not cursor.fetchone():
+            admin_email = os.environ.get("ADMIN_EMAIL", "admin@pehchaan.com")
+            admin_password = os.environ.get("ADMIN_PASSWORD")
+            if not admin_password:
+                admin_password = "admin123"
+                logger.warning(
+                    "ADMIN_PASSWORD not set — seeding admin with the insecure development "
+                    "default. Set ADMIN_PASSWORD for any non-local deployment."
+                )
+            hashed_password = get_password_hash(admin_password)
+            cursor.execute(
+                """
+                INSERT INTO users (email, password_hash, first_name, last_name, phone, role, is_verified)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (admin_email, hashed_password, "System", "Admin", "0000000000", "admin", True)
+            )
+            logger.info("Seeded admin user: %s", admin_email)
 
 seed_admin()
 
@@ -184,9 +244,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         token_data = TokenData(email=email)
     except JWTError:
         raise credentials_exception
-    
-    cursor.execute("SELECT * FROM users WHERE email = %s", (token_data.email,))
-    user = cursor.fetchone()
+
+    with get_cursor() as cursor:
+        cursor.execute("SELECT * FROM users WHERE email = %s", (token_data.email,))
+        user = cursor.fetchone()
     if user is None:
         raise credentials_exception
     return user
@@ -196,10 +257,8 @@ async def get_current_user_optional(token: str | None = Depends(oauth2_scheme_op
         return None
     try:
         return await get_current_user(token)
-    except:
+    except HTTPException:
         return None
-
-# --- Auth Endpoints ---
 
 # --- Auth Endpoints ---
 
@@ -216,88 +275,76 @@ async def register(
     if role == "admin":
         raise HTTPException(status_code=403, detail="Admin registration is restricted")
 
-    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-    existing_user = cursor.fetchone()
+    with get_cursor() as cursor:
+        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+        existing_user = cursor.fetchone()
+
     if existing_user:
         # existing_user: id(0), email(1), hash(2), first(3), last(4), phone(5), role(6)
         if existing_user[6] == 'citizen' and role == 'police':
-            # Handle Upgrade Request
-            # Check password to confirm ownership
+            # Citizen requesting an upgrade to police — confirm ownership via password
             if verify_password(password, existing_user[2]):
-                cursor.execute("UPDATE users SET role='police', is_verified=FALSE WHERE id=%s", (existing_user[0],))
-                conn.commit()
-                # We return a specific structure that frontend can detect
-                # We return a dummy token structure but with a special flag/message OR just valid response?
-                # Frontend expects Token. But if we return Token, the user will be logged in as "police" (unverified).
-                # Unverified police cannot access dashboard. ProtectedRoute will redirect them?
-                # Actually login endpoint blocks unverified police.
-                # So if we return token, front end stores it.
-                # User tries to navigate to /dashboard/police.
-                # ProtectedRoute checks role 'police'. It allows.
-                # But PoliceDashboard might fail or backend APIs might fail if they check verification?
-                # Let's see: check_admin_role checks "admin". get_current_user doesn't check verification.
-                # So they WOULD get access unless we block unverified in get_current_user.
-                # WE MUST BLOCK unverified police in get_current_user or specific APIs.
-                # But for now, let's just return a 202 or similar to indicate "request pending" and NOT return a token.
-                # But frontend expects Token response model.
-                # Let's raise an HTTPException with a specific detail string that frontend detects?
-                # No, that's ugly.
-                # Let's return a Token but with a role that indicates pending? No.
-                
-                # Best approach: Return a JSONResponse with 200 and a 'message' key, bypassing response_model validation?
-                # FASTAPI validates response_model.
-                # Let's use a specific exception that frontend treats as "Upgrade Success".
+                with get_cursor(commit=True) as cursor:
+                    cursor.execute(
+                        "UPDATE users SET role='police', is_verified=FALSE WHERE id=%s",
+                        (existing_user[0],)
+                    )
+                # Frontend detects this code as "upgrade requested, pending verification"
                 raise HTTPException(status_code=409, detail="UPGRADE_REQUESTED_POLICE")
             else:
                 raise HTTPException(status_code=400, detail="Account exists. Password incorrect for upgrade request.")
-        
+
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     hashed_password = get_password_hash(password)
-    
+
     profile_image = None
     if photo:
+        await validate_upload(photo)
         filename = f"user_{uuid.uuid4().hex[:12]}.jpg"
         image_path = os.path.join(USER_IMAGES_DIR, filename)
         with open(image_path, "wb") as f:
             f.write(await photo.read())
         profile_image = filename
-    
+
     try:
         is_verified = role != 'police'
-        cursor.execute(
-            """
-            INSERT INTO users (email, password_hash, first_name, last_name, phone, role, profile_image, is_verified)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, role, first_name
-            """,
-            (email, hashed_password, first_name, last_name, phone, role, profile_image, is_verified)
-        )
-        new_user = cursor.fetchone()
-        conn.commit()
-        
+        with get_cursor(commit=True) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO users (email, password_hash, first_name, last_name, phone, role, profile_image, is_verified)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, role, first_name
+                """,
+                (email, hashed_password, first_name, last_name, phone, role, profile_image, is_verified)
+            )
+            new_user = cursor.fetchone()
+
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
             data={"sub": email, "role": new_user[1]}, expires_delta=access_token_expires
         )
-        
+
         return {
-            "access_token": access_token, 
-            "token_type": "bearer", 
+            "access_token": access_token,
+            "token_type": "bearer",
             "role": new_user[1],
             "name": new_user[2]
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        conn.rollback()
+        logger.exception("Registration failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    # OAuth2PasswordRequestForm expects username and password fields
-    # We'll treat email as username
-    cursor.execute("SELECT * FROM users WHERE email = %s", (form_data.username,))
-    user = cursor.fetchone()
-    
+@limiter.limit("10/minute")
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+    # OAuth2PasswordRequestForm expects username and password fields; we treat email as username
+    with get_cursor() as cursor:
+        cursor.execute("SELECT * FROM users WHERE email = %s", (form_data.username,))
+        user = cursor.fetchone()
+
     # user row: id(0), email(1), hash(2), first(3), last(4), phone(5), role(6), profile_image(7), created_at(8), is_verified(9)
     if not user or not verify_password(form_data.password, user[2]):
         raise HTTPException(
@@ -316,9 +363,9 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = create_access_token(
         data={"sub": user[1], "role": user[6]}, expires_delta=access_token_expires
     )
-    
+
     return {
-        "access_token": access_token, 
+        "access_token": access_token,
         "token_type": "bearer",
         "role": user[6],
         "name": user[3]
@@ -327,10 +374,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 # --- Admin APIs ---
 
 def check_admin_role(user: dict = Depends(get_current_user)):
-    # user tuple from DB. We need to check role field.
-    # Cursor.fetchone returns tuple. We need to map it carefully or fetch by dict.
-    # Current get_current_user returns the full row tuple.
-    # Based on init_db: id(0), email(1), pass(2), first(3), last(4), phone(5), role(6)...
+    # user tuple: id(0), email(1), pass(2), first(3), last(4), phone(5), role(6)...
     if user[6] != "admin":
         raise HTTPException(status_code=403, detail="Admin privileges required")
     return user
@@ -340,24 +384,24 @@ def get_users(role: Optional[str] = None, verified: Optional[bool] = None, curre
     query = "SELECT id, first_name, last_name, email, role, is_verified, created_at FROM users"
     conditions = []
     params = []
-    
+
     if role:
         conditions.append("role = %s")
         params.append(role)
-    
-    # Handle boolean filter
+
     if verified is not None:
         conditions.append("is_verified = %s")
         params.append(verified)
-        
+
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-        
+
     query += " ORDER BY created_at DESC"
-    
-    cursor.execute(query, tuple(params))
-    users = cursor.fetchall()
-    
+
+    with get_cursor() as cursor:
+        cursor.execute(query, tuple(params))
+        users = cursor.fetchall()
+
     return [
         {
             "id": u[0],
@@ -373,22 +417,21 @@ def get_users(role: Optional[str] = None, verified: Optional[bool] = None, curre
 
 @app.post("/admin/users/{user_id}/verify")
 def verify_user(user_id: int, current_user = Depends(check_admin_role)):
-    cursor.execute("UPDATE users SET is_verified = TRUE WHERE id = %s", (user_id,))
-    conn.commit()
+    with get_cursor(commit=True) as cursor:
+        cursor.execute("UPDATE users SET is_verified = TRUE WHERE id = %s", (user_id,))
     return {"success": True, "message": "User verified successfully"}
 
 @app.put("/admin/users/{user_id}/role")
 def update_user_role(
-    user_id: int, 
-    role: str = Query(..., regex="^(citizen|police|admin)$"), 
+    user_id: int,
+    role: str = Query(..., regex="^(citizen|police|admin)$"),
     current_user = Depends(check_admin_role)
 ):
-    # Promote to target role and auto-verify
-    cursor.execute(
-        "UPDATE users SET role = %s, is_verified = TRUE WHERE id = %s", 
-        (role, user_id)
-    )
-    conn.commit()
+    with get_cursor(commit=True) as cursor:
+        cursor.execute(
+            "UPDATE users SET role = %s, is_verified = TRUE WHERE id = %s",
+            (role, user_id)
+        )
     return {"success": True, "message": f"User promoted to {role} successfully"}
 
 @app.post("/admin/create-admin")
@@ -399,50 +442,52 @@ def create_admin_user(
     password: str = Form(...),
     current_user = Depends(check_admin_role)
 ):
-    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-    existing_user = cursor.fetchone()
+    with get_cursor() as cursor:
+        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+        existing_user = cursor.fetchone()
+
     if existing_user:
-        # If user exists, just promote them to admin
-        cursor.execute("UPDATE users SET role = 'admin', is_verified = TRUE WHERE id = %s", (existing_user[0],))
-        conn.commit()
+        with get_cursor(commit=True) as cursor:
+            cursor.execute("UPDATE users SET role = 'admin', is_verified = TRUE WHERE id = %s", (existing_user[0],))
         return {"success": True, "message": "Existing user promoted to Admin successfully"}
-    
+
     hashed_password = get_password_hash(password)
-    
+
     try:
-        cursor.execute(
-            """
-            INSERT INTO users (email, password_hash, first_name, last_name, phone, role, is_verified)
-            VALUES (%s, %s, %s, %s, '0000000000', 'admin', TRUE)
-            """,
-            (email, hashed_password, first_name, last_name)
-        )
-        conn.commit()
+        with get_cursor(commit=True) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO users (email, password_hash, first_name, last_name, phone, role, is_verified)
+                VALUES (%s, %s, %s, %s, '0000000000', 'admin', TRUE)
+                """,
+                (email, hashed_password, first_name, last_name)
+            )
         return {"success": True, "message": "Admin user created successfully"}
     except Exception as e:
-        conn.rollback()
+        logger.exception("Admin creation failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/admin/activity")
 def get_system_activity(limit: int = 50, current_user = Depends(check_admin_role)):
-    cursor.execute(
-        """
-        SELECT 
-            t.title, 
-            t.description, 
-            t.status, 
-            to_char(t.event_date, 'DD Mon YYYY, HH:MI AM'),
-            t.case_id,
-            p.name
-        FROM case_timeline t
-        LEFT JOIN persons p ON t.case_id = p.final_person_id
-        ORDER BY t.event_date DESC
-        LIMIT %s
-        """,
-        (limit,)
-    )
-    rows = cursor.fetchall()
-    
+    with get_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                t.title,
+                t.description,
+                t.status,
+                to_char(t.event_date, 'DD Mon YYYY, HH:MI AM'),
+                t.case_id,
+                p.name
+            FROM case_timeline t
+            LEFT JOIN persons p ON t.case_id = p.final_person_id
+            ORDER BY t.event_date DESC
+            LIMIT %s
+            """,
+            (limit,)
+        )
+        rows = cursor.fetchall()
+
     return [
         {
             "title": r[0],
@@ -459,12 +504,41 @@ def get_system_activity(limit: int = 50, current_user = Depends(check_admin_role
 def root():
     return {"status": "LostBuddy API running 🚀"}
 
+@app.get("/health")
+def health():
+    """Readiness probe: checks PostgreSQL and Qdrant connectivity."""
+    services = {}
+    ok = True
+    try:
+        db_ping()
+        services["postgres"] = "ok"
+    except Exception as e:
+        services["postgres"] = f"error: {e}"
+        ok = False
+    try:
+        qdrant.get_collections()
+        services["qdrant"] = "ok"
+    except Exception as e:
+        services["qdrant"] = f"error: {e}"
+        ok = False
+
+    payload = {"status": "ok" if ok else "degraded", "services": services}
+    return JSONResponse(status_code=200 if ok else 503, content=payload)
+
 # -------------------------
-# ✅ CORS MUST COME FIRST
+# CORS
 # -------------------------
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:5173",
+    ).split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://jhku5paqt5rcq.ok.kimi.link", "http://localhost:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -473,25 +547,20 @@ app.add_middleware(
 # -------------------------
 # Static files
 # -------------------------
-# -------------------------
-# Static files
-# -------------------------
-# Try to find images relative to this file first (Local dev)
-# Try to find images relative to this file first (Local dev)
+# Try to find images relative to this file first (local dev), fall back to Docker paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(BASE_DIR, "../final_images")
 USER_IMAGES_DIR = os.path.join(BASE_DIR, "../user_uploads")
 
 if not os.path.exists(IMAGES_DIR):
-    # Fallback for Docker
     IMAGES_DIR = "/app/final_images"
     USER_IMAGES_DIR = "/app/user_uploads"
 
 os.makedirs(IMAGES_DIR, exist_ok=True)
 os.makedirs(USER_IMAGES_DIR, exist_ok=True)
 
-print("📂 Serving images from:", IMAGES_DIR)
-print("📂 Serving user uploads from:", USER_IMAGES_DIR)
+logger.info("Serving images from: %s", IMAGES_DIR)
+logger.info("Serving user uploads from: %s", USER_IMAGES_DIR)
 
 app.mount("/uploads", StaticFiles(directory=IMAGES_DIR), name="uploads")
 app.mount("/user-uploads", StaticFiles(directory=USER_IMAGES_DIR), name="user_uploads")
@@ -506,22 +575,99 @@ def get_persons_alias():
 # -------------------------
 # Utils
 # -------------------------
+async def validate_upload(file: UploadFile):
+    """Reject non-image and oversized uploads before doing any work."""
+    content_type = (file.content_type or "").lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+    # Size check: prefer the header, fall back to reading then rewinding.
+    size = getattr(file, "size", None)
+    if size is not None and size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 10 MB)")
+
+
 def load_image(file: UploadFile) -> Image.Image:
     try:
+        # Read fully into memory so the returned Image does not depend on the
+        # (about to be closed) underlying stream.
         img = Image.open(file.file).convert("RGB")
+        img.load()
         return img
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid image file")
     finally:
         file.file.close()
 
 
+def notify_police_admins(cursor, title: str, message: str, notif_type: str = "match"):
+    """Insert one notification per police/admin user using a single fetch."""
+    cursor.execute("SELECT id FROM users WHERE role IN ('admin', 'police')")
+    for (p_id,) in cursor.fetchall():
+        cursor.execute(
+            """
+            INSERT INTO notifications (user_id, title, message, type)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (p_id, title, message, notif_type)
+        )
+
+
+def add_timeline_event(cursor, case_id: str, title: str, description: str, status: str, actor_id=None):
+    """Append a case timeline event, recording which user (if any) caused it."""
+    cursor.execute(
+        """
+        INSERT INTO case_timeline (case_id, title, description, status, actor_id)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (case_id, title, description, status, actor_id)
+    )
+
+
+def escalate_if_high_confidence(cursor, row, score: float, source: str, actor_id=None):
+    """Alert police on a high-confidence search hit, at most once per case per
+    ESCALATION_DEDUP_HOURS window. row is (final_person_id, name, ..., tracing_status at [7])."""
+    if score <= ESCALATION_THRESHOLD or row[7] in ("matched", "closed"):
+        return
+    cursor.execute(
+        """
+        SELECT 1 FROM case_timeline
+        WHERE case_id = %s AND title = 'Potential Match Detected'
+          AND event_date > NOW() - make_interval(hours => %s)
+        LIMIT 1
+        """,
+        (row[0], ESCALATION_DEDUP_HOURS)
+    )
+    if cursor.fetchone():
+        return
+    add_timeline_event(
+        cursor, row[0], "Potential Match Detected",
+        f"A high-confidence match was found during a {source}.", "under-review", actor_id,
+    )
+    notify_police_admins(
+        cursor,
+        "Search Match Alert",
+        f"High confidence match ({int(score*100)}%) found for case {row[1]} during a {source}.",
+    )
+
+
+def rerank_score(score: float, row, sex, state) -> float:
+    """Cosine stays primary; small boosts when gender/state agree. row[2]=sex, row[4]=state."""
+    rerank = score
+    if sex and row[2] and sex.strip().lower() == row[2].strip().lower():
+        rerank += RERANK_BOOST
+    if state and row[4] and state.strip().upper() == row[4].strip().upper():
+        rerank += RERANK_BOOST
+    return round(rerank, 4)
+
+
 # -------------------------
-# POST /upload-photo
-# (validate face only)
+# POST /upload-photo  (validate face only)
 # -------------------------
 @app.post("/upload-photo")
 async def upload_photo(file: UploadFile = File(...)):
+    await validate_upload(file)
     img = load_image(file)
     emb = get_embedding(img)
 
@@ -532,11 +678,12 @@ async def upload_photo(file: UploadFile = File(...)):
 
 
 # -------------------------
-# POST /register-face
-# (store new face + metadata)
+# POST /register-face  (store new face + metadata)
 # -------------------------
 @app.post("/register-face")
+@limiter.limit("20/minute")
 async def register_face(
+    request: Request,
     file: UploadFile = File(...),
     name: str = Query(...),
     sex: str = Query(...),
@@ -546,6 +693,7 @@ async def register_face(
     police_station: str = Query(...),
     current_user = Depends(get_current_user)
 ):
+    await validate_upload(file)
     final_person_id = str(uuid.uuid4())
     filename = f"{final_person_id}.jpg"
     image_path = os.path.join(IMAGES_DIR, filename)
@@ -565,41 +713,45 @@ async def register_face(
 
     vector = emb.tolist() if hasattr(emb, "tolist") else list(emb)
 
-    # Store vector in Qdrant
-    qdrant.upsert(
-        collection_name=QDRANT_COLLECTION,
-        points=[
-            {
-                "id": uuid.uuid4().int >> 64,
-                "vector": vector,
-                "payload": {
-                    "FinalPersonId": final_person_id
-                }
-            }
-        ]
-    )
-
-    # Store metadata in PostgreSQL
-    cursor.execute(
-        """
-        INSERT INTO persons
-        (final_person_id, name, sex, birth_year, state, district, police_station, tracing_status, image_file, reporter_id)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """,
-        (
-            final_person_id,
-            name,
-            sex,
-            birth_year,
-            state.upper(),
-            district.upper(),
-            police_station.upper(),
-            "missing",
-            filename,
-            current_user[0]
-        )
-    )
-    conn.commit()
+    # Atomic write: insert Postgres row first, then upsert the vector as the
+    # final action. If Qdrant fails the transaction rolls back (no orphan row)
+    # and we delete the saved image (no orphan file).
+    try:
+        with get_cursor(commit=True) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO persons
+                (final_person_id, name, sex, birth_year, state, district, police_station, tracing_status, image_file, reporter_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    final_person_id,
+                    name,
+                    sex,
+                    birth_year,
+                    state.upper(),
+                    district.upper(),
+                    police_station.upper(),
+                    "submitted",
+                    filename,
+                    current_user[0]
+                )
+            )
+            qdrant.upsert(
+                collection_name=QDRANT_COLLECTION,
+                points=[
+                    {
+                        "id": uuid.uuid4().int >> 64,
+                        "vector": vector,
+                        "payload": {"FinalPersonId": final_person_id}
+                    }
+                ]
+            )
+    except Exception as e:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        logger.exception("register_face failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {
         "success": True,
@@ -612,135 +764,64 @@ async def register_face(
 # POST /search
 # -------------------------
 @app.post("/search")
+@limiter.limit("30/minute")
 async def search_face(
+    request: Request,
     file: UploadFile = File(...),
-    top: int = Query(5)
+    top: int = Query(5),
+    threshold: float = Query(MATCH_THRESHOLD, ge=0.0, le=1.0),
+    sex: str | None = Query(None),
+    state: str | None = Query(None),
+    current_user = Depends(get_current_user),
 ):
+    await validate_upload(file)
     img = load_image(file)
-    emb = get_embedding(img)
+    face = get_primary_face(img)
 
-    if emb is None:
+    if face is None:
         return {"success": True, "matches": [], "message": "No face detected"}
+    if not face["quality_ok"]:
+        return {
+            "success": True,
+            "matches": [],
+            "message": "Image quality too low — use a clearer, larger, front-facing photo.",
+        }
 
     results = qdrant.search(
         collection_name=QDRANT_COLLECTION,
-        query_vector=emb.tolist(),
+        query_vector=face["embedding"].tolist(),
         limit=top
     )
 
-    matches = []
+    # Keep results above threshold, then fetch all metadata in ONE query
+    kept = [(r.payload.get("FinalPersonId"), float(r.score)) for r in results if r.score >= threshold]
+    if not kept:
+        return {"success": True, "matches": []}
 
-    for r in results:
-        # similarity threshold (important)
-        if r.score < 0.60:
-            continue
-
-        pid = r.payload.get("FinalPersonId")
-
+    pids = [pid for pid, _ in kept]
+    with get_cursor(commit=True) as cursor:
         cursor.execute(
-            "SELECT * FROM persons WHERE final_person_id = %s",
-            (pid,)
+            """
+            SELECT final_person_id, name, sex, birth_year, state, district,
+                   police_station, tracing_status, image_file
+            FROM persons WHERE final_person_id = ANY(%s)
+            """,
+            (pids,)
         )
-        row = cursor.fetchone()
-        if not row:
-            continue
-            
-        # --- AUTOMATION: New Match Detected via Search ---
-        # If high confidence match found (e.g. > 0.75), log to timeline & notify police
-        # Use a slightly higher threshold for automated alerts to avoid spam
-        if r.score > 0.75:
-             # Check if we already logged this match recently to avoid spam? 
-             # For MVP, we just log it. Alternatively check if status is already 'matched'.
-             current_status = row[7] # tracing_status
-             if current_status not in ['matched', 'closed']:
-                 # 1. Update Timeline
-                 cursor.execute(
-                    """
-                    INSERT INTO case_timeline (case_id, title, description, status)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (pid, "Potential Match Detected", "A high-confidence match was found during a public search.", "under-review")
-                 )
-                 
-                 # 2. Notify Police
-                 # We only notify if we haven't already (optimization omitted for MVP longevity)
-                 cursor.execute("SELECT id FROM users WHERE role IN ('admin', 'police')")
-                 police_users = cursor.fetchall()
-                 for (p_id,) in police_users:
-                     cursor.execute(
-                        """
-                        INSERT INTO notifications (user_id, title, message, type)
-                        VALUES (%s, %s, %s, %s)
-                        """,
-                        (p_id, "Search Match Alert", f"High confidence match ({int(r.score*100)}%) found for case {row[1]} during public search.", "match")
-                     )
-                 conn.commit()
-
-        matches.append({
-            "FinalPersonId": pid,
-            "score": float(r.score),
-            "name": row[1],
-            "sex": row[2],
-            "birth_year": row[3],
-            "state": row[4],
-            "district": row[5],
-            "police_station": row[6],
-            "tracing_status": row[7],
-            "image_file": row[8],
-        })
-
-    return {
-        "success": True,
-        "matches": matches
-    }
-
-
-# -------------------------
-# POST /search-scene
-# Multi-face scene search: detect ALL faces in image, search each against DB
-# -------------------------
-
-@app.post("/search-scene")
-async def search_scene(
-    file: UploadFile = File(...),
-    top: int = Query(3)
-):
-    img = load_image(file)
-    w, h = img.size
-    detected_faces = get_all_face_embeddings(img)
-
-    if not detected_faces:
-        return {"success": True, "image_width": w, "image_height": h, "faces": [], "message": "No faces detected in image"}
-
-    face_results = []
-
-    for face_data in detected_faces:
-        emb = face_data["embedding"]
-        bbox = face_data["bbox"]
-
-        results = qdrant.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=emb.tolist(),
-            limit=top
-        )
+        by_pid = {row[0]: row for row in cursor.fetchall()}
 
         matches = []
-        for r in results:
-            if r.score < 0.60:
-                continue
-
-            pid = r.payload.get("FinalPersonId")
-            cursor.execute(
-                "SELECT final_person_id, name, sex, birth_year, state, district, police_station, tracing_status, image_file FROM persons WHERE final_person_id = %s",
-                (pid,)
-            )
-            row = cursor.fetchone()
+        for pid, score in kept:
+            row = by_pid.get(pid)
             if not row:
                 continue
 
+            escalate_if_high_confidence(cursor, row, score, "photo search", current_user[0])
+
             matches.append({
                 "FinalPersonId": row[0],
-                "score": float(r.score),
+                "score": score,
+                "rerank_score": rerank_score(score, row, sex, state),
                 "name": row[1],
                 "sex": row[2],
                 "birth_year": row[3],
@@ -751,11 +832,89 @@ async def search_scene(
                 "image_file": row[8],
             })
 
-        face_results.append({
-            "face_index": face_data["face_index"],
-            "bbox": bbox,
-            "matches": matches,
-        })
+    matches.sort(key=lambda m: m["rerank_score"], reverse=True)
+    return {"success": True, "matches": matches}
+
+
+# -------------------------
+# POST /search-scene  (multi-face: detect ALL faces, search each)
+# -------------------------
+@app.post("/search-scene")
+@limiter.limit("15/minute")
+async def search_scene(
+    request: Request,
+    file: UploadFile = File(...),
+    top: int = Query(3),
+    threshold: float = Query(MATCH_THRESHOLD, ge=0.0, le=1.0),
+    sex: str | None = Query(None),
+    state: str | None = Query(None),
+    current_user = Depends(get_current_user),
+):
+    await validate_upload(file)
+    img = load_image(file)
+    w, h = img.size
+    detected_faces = get_all_face_embeddings(img)
+
+    if not detected_faces:
+        return {"success": True, "image_width": w, "image_height": h, "faces": [], "message": "No faces detected in image"}
+
+    # Search every face, collect all PIDs, then fetch metadata in one query
+    # One Qdrant round-trip for all faces, then one Postgres query for all candidates
+    batch_results = qdrant.search_batch(
+        collection_name=QDRANT_COLLECTION,
+        requests=[
+            SearchRequest(vector=f["embedding"].tolist(), limit=top, with_payload=True)
+            for f in detected_faces
+        ],
+    )
+    per_face = []
+    all_pids = set()
+    for face_data, results in zip(detected_faces, batch_results):
+        kept = [(r.payload.get("FinalPersonId"), float(r.score)) for r in results if r.score >= threshold]
+        all_pids.update(pid for pid, _ in kept)
+        per_face.append((face_data, kept))
+
+    by_pid = {}
+    if all_pids:
+        with get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT final_person_id, name, sex, birth_year, state, district,
+                       police_station, tracing_status, image_file
+                FROM persons WHERE final_person_id = ANY(%s)
+                """,
+                (list(all_pids),)
+            )
+            by_pid = {row[0]: row for row in cursor.fetchall()}
+
+    face_results = []
+    with get_cursor(commit=True) as cursor:
+        for face_data, kept in per_face:
+            matches = []
+            for pid, score in kept:
+                row = by_pid.get(pid)
+                if not row:
+                    continue
+                escalate_if_high_confidence(cursor, row, score, "scene search", current_user[0])
+                matches.append({
+                    "FinalPersonId": row[0],
+                    "score": score,
+                    "rerank_score": rerank_score(score, row, sex, state),
+                    "name": row[1],
+                    "sex": row[2],
+                    "birth_year": row[3],
+                    "state": row[4],
+                    "district": row[5],
+                    "police_station": row[6],
+                    "tracing_status": row[7],
+                    "image_file": row[8],
+                })
+            matches.sort(key=lambda m: m["rerank_score"], reverse=True)
+            face_results.append({
+                "face_index": face_data["face_index"],
+                "bbox": face_data["bbox"],
+                "matches": matches,
+            })
 
     return {
         "success": True,
@@ -766,22 +925,21 @@ async def search_scene(
 
 
 # -------------------------
-# GET /cases
+# GET /cases/{id}
 # -------------------------
-
-
 @app.get("/cases/{case_id}")
 def get_case_by_id(case_id: str):
-    cursor.execute(
-        """
-        SELECT final_person_id, name, sex, birth_year, state,
-               district, police_station, tracing_status, image_file
-        FROM persons
-        WHERE final_person_id = %s
-        """,
-        (case_id,)
-    )
-    row = cursor.fetchone()
+    with get_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT final_person_id, name, sex, birth_year, state,
+                   district, police_station, tracing_status, image_file
+            FROM persons
+            WHERE final_person_id = %s
+            """,
+            (case_id,)
+        )
+        row = cursor.fetchone()
 
     if not row:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -802,53 +960,53 @@ def get_case_by_id(case_id: str):
     }
 
 @app.post("/cases/{case_id}/flag-match")
+@limiter.limit("20/minute")
 async def flag_potential_match(
+    request: Request,
     case_id: str,
     file: UploadFile = File(...),
     current_user = Depends(get_current_user)
 ):
-    # Save the submitted image
+    await validate_upload(file)
     filename = f"match_{uuid.uuid4().hex[:12]}.jpg"
     image_path = os.path.join(USER_IMAGES_DIR, filename)
-    
+
     with open(image_path, "wb") as f:
         f.write(await file.read())
 
-    # 1. Log to Timeline
-    cursor.execute(
-        """
-        INSERT INTO case_timeline (case_id, title, description, status)
-        VALUES (%s, %s, %s, %s)
-        """,
-        (case_id, "Potential Match Flagged", "A user flagged a potential match with photo evidence.", "under-review")
-    )
-    
-    # 2. Add to Potential Matches Table
-    cursor.execute(
-        """
-        INSERT INTO potential_matches (case_id, submitted_image, status)
-        VALUES (%s, %s, 'pending')
-        """,
-        (case_id, filename)
-    )
+    try:
+        with get_cursor(commit=True) as cursor:
+            cursor.execute("SELECT name FROM persons WHERE final_person_id = %s", (case_id,))
+            person = cursor.fetchone()
+            if not person:
+                raise HTTPException(status_code=404, detail="Case not found")
+            person_name = person[0]
 
-    # 3. Notify Police/Admins
-    cursor.execute("SELECT name FROM persons WHERE final_person_id = %s", (case_id,))
-    person = cursor.fetchone()
-    person_name = person[0] if person else "Unknown"
-
-    cursor.execute("SELECT id FROM users WHERE role IN ('admin', 'police')")
-    police_users = cursor.fetchall()
-    
-    for (p_id,) in police_users:
-        cursor.execute(
-            """
-            INSERT INTO notifications (user_id, title, message, type)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (p_id, "Match Review Required", f"New potential match flagged for Case {person_name}. Please review evidence.", "match")
-        )
-    conn.commit()
+            add_timeline_event(
+                cursor, case_id, "Potential Match Flagged",
+                "A user flagged a potential match with photo evidence.", "under-review", current_user[0],
+            )
+            cursor.execute(
+                """
+                INSERT INTO potential_matches (case_id, submitted_image, status, requested_by)
+                VALUES (%s, %s, 'pending', %s)
+                """,
+                (case_id, filename, current_user[0])
+            )
+            notify_police_admins(
+                cursor,
+                "Match Review Required",
+                f"New potential match flagged for Case {person_name}. Please review evidence.",
+            )
+    except HTTPException:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        raise
+    except Exception as e:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        logger.exception("flag_potential_match failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {"success": True, "message": "Match flagged and evidence submitted for review."}
 
@@ -856,18 +1014,18 @@ async def flag_potential_match(
 
 @app.get("/admin/potential-matches")
 def get_potential_matches(current_user = Depends(check_admin_role)):
-    query = """
-        SELECT 
-            pm.id, pm.case_id, pm.submitted_image, pm.status, pm.created_at,
-            p.name, p.image_file, p.district, p.state, p.reporter_id
-        FROM potential_matches pm
-        JOIN persons p ON pm.case_id = p.final_person_id
-        WHERE pm.status = 'pending'
-        ORDER BY pm.created_at DESC
-    """
-    cursor.execute(query)
-    rows = cursor.fetchall()
-    
+    with get_cursor() as cursor:
+        cursor.execute("""
+            SELECT
+                pm.id, pm.case_id, pm.submitted_image, pm.status, pm.created_at,
+                p.name, p.image_file, p.district, p.state, p.reporter_id
+            FROM potential_matches pm
+            JOIN persons p ON pm.case_id = p.final_person_id
+            WHERE pm.status = 'pending'
+            ORDER BY pm.created_at DESC
+        """)
+        rows = cursor.fetchall()
+
     return [
         {
             "id": r[0],
@@ -885,58 +1043,47 @@ def get_potential_matches(current_user = Depends(check_admin_role)):
 
 @app.post("/admin/matches/{match_id}/confirm")
 def confirm_match(match_id: int, current_user = Depends(check_admin_role)):
-    # Get match details
-    cursor.execute("SELECT case_id, submitted_image FROM potential_matches WHERE id = %s", (match_id,))
-    match = cursor.fetchone()
-    if not match:
-        raise HTTPException(status_code=404, detail="Match not found")
-        
-    case_id = match[0]
-    
-    # 1. Update Match Status
-    cursor.execute("UPDATE potential_matches SET status = 'confirmed' WHERE id = %s", (match_id,))
-    
-    # 2. Update Case Status
-    cursor.execute("UPDATE persons SET tracing_status = 'matched' WHERE final_person_id = %s", (case_id,))
-    
-    # 3. Update Timeline
-    cursor.execute(
-        """
-        INSERT INTO case_timeline (case_id, title, description, status)
-        VALUES (%s, %s, %s, 'matched')
-        """,
-        (case_id, "Match Confirmed", "Administrative review confirmed the potential match.",)
-    )
-    
-    # 4. Notify Reporter
-    cursor.execute("SELECT reporter_id, name FROM persons WHERE final_person_id = %s", (case_id,))
-    person_row = cursor.fetchone()
-    if person_row and person_row[0]:
-        reporter_id = person_row[0]
-        case_name = person_row[1]
-        cursor.execute(
-            """
-            INSERT INTO notifications (user_id, title, message, type)
-            VALUES (%s, %s, %s, 'match')
-            """,
-            (reporter_id, "Match FOUND!", f"Great news! A match has been confirmed for {case_name}. Please contact police.",)
+    with get_cursor(commit=True) as cursor:
+        cursor.execute("SELECT case_id, submitted_image, status FROM potential_matches WHERE id = %s", (match_id,))
+        match = cursor.fetchone()
+        if not match:
+            raise HTTPException(status_code=404, detail="Match not found")
+        if match[2] != 'pending':
+            raise HTTPException(status_code=400, detail=f"Match already {match[2]}")
+
+        case_id = match[0]
+
+        cursor.execute("UPDATE potential_matches SET status = 'confirmed' WHERE id = %s", (match_id,))
+        cursor.execute("UPDATE persons SET tracing_status = 'matched' WHERE final_person_id = %s", (case_id,))
+        add_timeline_event(
+            cursor, case_id, "Match Confirmed",
+            "Administrative review confirmed the potential match.", "matched", current_user[0],
         )
-        
-    conn.commit()
+
+        cursor.execute("SELECT reporter_id, name FROM persons WHERE final_person_id = %s", (case_id,))
+        person_row = cursor.fetchone()
+        if person_row and person_row[0]:
+            cursor.execute(
+                """
+                INSERT INTO notifications (user_id, title, message, type)
+                VALUES (%s, %s, %s, 'match')
+                """,
+                (person_row[0], "Match FOUND!",
+                 f"Great news! A match has been confirmed for {person_row[1]}. Please contact police.",)
+            )
+
     return {"success": True, "message": "Match confirmed and reporter notified."}
 
 @app.post("/admin/matches/{match_id}/reject")
 def reject_match(match_id: int, current_user = Depends(check_admin_role)):
-    cursor.execute("UPDATE potential_matches SET status = 'rejected' WHERE id = %s", (match_id,))
-    
-    # Optional: Notify user who submitted? (If we tracked who submitted, which is 'Anonymous' currently in frontend logic)
-    # For now just update status.
-    
-    conn.commit()
+    with get_cursor(commit=True) as cursor:
+        cursor.execute("UPDATE potential_matches SET status = 'rejected' WHERE id = %s", (match_id,))
     return {"success": True, "message": "Match rejected."}
 
 @app.post("/report/missing")
+@limiter.limit("20/minute")
 async def report_missing(
+    request: Request,
     name: str = Form(...),
     gender: str = Form(...),
     birth_year: int = Form(...),
@@ -946,154 +1093,115 @@ async def report_missing(
     photo: UploadFile = File(...),
     current_user = Depends(get_current_user)
 ):
+    await validate_upload(photo)
+    final_person_id = f"FP_{uuid.uuid4().hex[:12]}"
+    filename = f"{final_person_id}.jpg"
+    image_path = os.path.join(IMAGES_DIR, filename)
+
+    with open(image_path, "wb") as f:
+        f.write(await photo.read())
+
+    with Image.open(image_path) as im:
+        img = im.convert("RGB")
+
+    embedding = get_embedding(img)
+    if embedding is None:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        raise HTTPException(status_code=400, detail="No face detected in uploaded image")
+
+    vector = embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+
+    # Check for matches against EXISTING records before inserting self (no self-match)
+    search_results = qdrant.search(
+        collection_name=QDRANT_COLLECTION,
+        query_vector=vector,
+        limit=5
+    )
+    match_found = any(
+        r.score > REPORT_MATCH_THRESHOLD and r.payload.get("FinalPersonId") != final_person_id
+        for r in search_results
+    )
+
+    # Atomic write: Postgres rows first, Qdrant upsert as the final action.
     try:
-        final_person_id = f"FP_{uuid.uuid4().hex[:12]}"
-
-        filename = f"{final_person_id}.jpg"
-        image_path = os.path.join(IMAGES_DIR, filename)
-
-        with open(image_path, "wb") as f:
-            f.write(await photo.read())
-
-        # Proper image handling (avoid file-lock issues)
-        with Image.open(image_path) as im:
-            img = im.convert("RGB")
-
-        embedding = get_embedding(img)
-        if embedding is None:
-            raise HTTPException(status_code=400, detail="No face detected in uploaded image")
-
-        # Ensure embedding is a plain Python list of floats
-        vector = embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
-
-        qdrant.upsert(
-            collection_name=QDRANT_COLLECTION,
-            points=[
-                {
-                    "id": uuid.uuid4().int >> 64,
-                    "vector": vector,
-                    "payload": {
-                        "FinalPersonId": final_person_id
-                    },
-                }
-            ],
-        )
-
-        cursor.execute(
-            """
-            INSERT INTO persons (
-                final_person_id,
-                name,
-                sex,
-                birth_year,
-                state,
-                district,
-                police_station,
-                tracing_status,
-                image_file,
-                reporter_id
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """,
-            (
-                final_person_id,
-                name,
-                gender.upper(),
-                birth_year,
-                state.upper(),
-                district.upper(),
-                police_station.upper(),
-                "Untraced",
-                filename,
-                current_user[0]
-            ),
-        )
-
-        # 1. Timeline: Case Submitted
-        cursor.execute(
-            """
-            INSERT INTO case_timeline (case_id, title, description, status)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (final_person_id, "Case Submitted", "Report has been submitted and is pending verification.", "submitted")
-        )
-
-        # 2. Automated Match Check (to notify Police)
-        # Search Qdrant for existing faces that might match this new one
-        # logic: search qdrant with the NEW vector
-        search_results = qdrant.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=vector,
-            limit=5
-        )
-        
-        match_found = False
-        for r in search_results:
-             if r.id != uuid.UUID(int=0) and r.score > 0.65: # Exclude self if somehow searched, but IDs differ. 
-                 # Actually Qdrant might return the just-inserted point.
-                 # We should check if payload FinalPersonId != final_person_id
-                 if r.payload.get("FinalPersonId") != final_person_id:
-                     match_found = True
-                     break
-        
-        if match_found:
-            # Notify ALL Police/Admins
-            cursor.execute("SELECT id FROM users WHERE role IN ('admin', 'police')")
-            police_users = cursor.fetchall()
-            for (p_id,) in police_users:
-                cursor.execute(
-                    """
-                    INSERT INTO notifications (user_id, title, message, type)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (p_id, "Potential Match Found", f"A new case ({name}) matches an existing record.", "match")
+        with get_cursor(commit=True) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO persons (
+                    final_person_id, name, sex, birth_year, state, district,
+                    police_station, tracing_status, image_file, reporter_id
                 )
-                
-        conn.commit()
-
-        return {
-            "success": True,
-            "case_id": final_person_id
-        }
-    
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    final_person_id, name, gender.upper(), birth_year,
+                    state.upper(), district.upper(), police_station.upper(),
+                    "submitted", filename, current_user[0]
+                ),
+            )
+            add_timeline_event(
+                cursor, final_person_id, "Case Submitted",
+                "Report has been submitted and is pending verification.", "submitted", current_user[0],
+            )
+            if match_found:
+                notify_police_admins(
+                    cursor,
+                    "Potential Match Found",
+                    f"A new case ({name}) matches an existing record.",
+                )
+            qdrant.upsert(
+                collection_name=QDRANT_COLLECTION,
+                points=[
+                    {
+                        "id": uuid.uuid4().int >> 64,
+                        "vector": vector,
+                        "payload": {"FinalPersonId": final_person_id},
+                    }
+                ],
+            )
     except HTTPException:
         raise
     except Exception as e:
-        conn.rollback()
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        logger.exception("report_missing failed")
         raise HTTPException(status_code=500, detail=str(e))
 
-        
-from fastapi import Query
+    return {"success": True, "case_id": final_person_id}
+
 
 @app.get("/dashboard/stats")
 def get_dashboard_stats():
-    cursor.execute("SELECT COUNT(*) FROM persons")
-    total_cases = cursor.fetchone()[0]
+    with get_cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM persons")
+        total_cases = cursor.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status = 'Traced'")
-    traced = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status = 'matched'")
+        traced = cursor.fetchone()[0]
 
-    cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status IN ('Untraced', 'missing')")
-    untraced = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status IN ('submitted', 'Untraced', 'missing')")
+        untraced = cursor.fetchone()[0]
 
-    # Assuming 'matched' status indicates a confirmed match
-    cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status = 'matched'")
-    matched = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM persons WHERE tracing_status = 'matched'")
+        matched = cursor.fetchone()[0]
 
-    # 1. Status Distribution
-    # We map DB tracing_status to frontend friendly labels
-    # submitted: 'missing', 'Untraced'
-    # verified: (custom logic or explicit status if added) - here simplifying
-    # matched: 'matched'
-    
-    cursor.execute("""
-        SELECT tracing_status, COUNT(*) 
-        FROM persons 
-        GROUP BY tracing_status
-    """)
-    status_rows = cursor.fetchall()
-    
-    # Init defaults
+        cursor.execute("""
+            SELECT tracing_status, COUNT(*)
+            FROM persons
+            GROUP BY tracing_status
+        """)
+        status_rows = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT to_char(created_at, 'Mon'), COUNT(*)
+            FROM persons
+            WHERE created_at >= NOW() - INTERVAL '12 months'
+            GROUP BY 1, EXTRACT(MONTH FROM created_at)
+            ORDER BY EXTRACT(MONTH FROM created_at)
+        """)
+        activity_rows = cursor.fetchall()
+
     distribution = {
         "submitted": 0,
         "verified": 0,
@@ -1101,9 +1209,8 @@ def get_dashboard_stats():
         "matched": 0,
         "closed": 0
     }
-    
-    for status, count in status_rows:
-        s = status.lower()
+    for status_val, count in status_rows:
+        s = (status_val or "").lower()
         if s in ['missing', 'untraced']:
             distribution['submitted'] += count
         elif s == 'matched':
@@ -1115,26 +1222,9 @@ def get_dashboard_stats():
         elif s == 'closed':
             distribution['closed'] += count
         else:
-            # Fallback for others
             distribution['submitted'] += count
 
-    # 2. Yearly Activity (Last 12 Months)
-    # Return count per month
-    cursor.execute("""
-        SELECT to_char(created_at, 'Mon'), COUNT(*)
-        FROM persons
-        WHERE created_at >= NOW() - INTERVAL '12 months'
-        GROUP BY 1, EXTRACT(MONTH FROM created_at)
-        ORDER BY EXTRACT(MONTH FROM created_at)
-    """)
-    activity_rows = cursor.fetchall()
-
-    # Format: [{'month': 'Jan', 'cases': 5}, ...]
-    yearly_activity = []
-    # Simplified map for now, assuming rows returned in roughly correct order.
-    # Ideally should fill in missing months with 0.
-    for month_name, count in activity_rows:
-        yearly_activity.append({"month": month_name, "cases": count})
+    yearly_activity = [{"month": month_name, "cases": count} for month_name, count in activity_rows]
 
     return {
         "success": True,
@@ -1160,14 +1250,13 @@ def get_cases(
     min_age: int | None = None,
     max_age: int | None = None,
     mine: bool = False,
-    current_user: Token = Depends(get_current_user_optional) # We need a new dep for optional auth or just handle error if mine=True
+    current_user: Token = Depends(get_current_user_optional)
 ):
-    # ... logic for current_user ..
     user_id = None
     if mine:
-         if not current_user:
-             raise HTTPException(status_code=401, detail="Authentication required for 'mine' filter")
-         user_id = current_user[0]
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Authentication required for 'mine' filter")
+        user_id = current_user[0]
     offset = (page - 1) * limit
     conditions = []
     values = []
@@ -1191,14 +1280,8 @@ def get_cases(
     if min_age is not None and max_age is not None:
         import datetime
         current_year = datetime.datetime.now().year
-        # Age 10 => born in 2015 (if 2025). max_birth_year
-        # Age 20 => born in 2005. min_birth_year
-        # Range age [10, 20] => birth_year [2005, 2015]
-        # birth_year >= (current - max_age) AND birth_year <= (current - min_age)
-        
         min_birth_year = current_year - max_age
         max_birth_year = current_year - min_age
-        
         conditions.append("birth_year >= %s AND birth_year <= %s")
         values.append(min_birth_year)
         values.append(max_birth_year)
@@ -1211,27 +1294,22 @@ def get_cases(
     if conditions:
         where_clause = "WHERE " + " AND ".join(conditions)
 
-    # total count
-    cursor.execute(
-        f"SELECT COUNT(*) FROM persons {where_clause}",
-        tuple(values),
-    )
-    total = cursor.fetchone()[0]
+    with get_cursor() as cursor:
+        cursor.execute(f"SELECT COUNT(*) FROM persons {where_clause}", tuple(values))
+        total = cursor.fetchone()[0]
 
-    # paginated data
-    cursor.execute(
-        f"""
-        SELECT final_person_id, name, sex, birth_year, state,
-               district, police_station, tracing_status, image_file
-        FROM persons
-        {where_clause}
-        ORDER BY created_at DESC
-        LIMIT %s OFFSET %s
-        """,
-        tuple(values + [limit, offset]),
-    )
-
-    rows = cursor.fetchall()
+        cursor.execute(
+            f"""
+            SELECT final_person_id, name, sex, birth_year, state,
+                   district, police_station, tracing_status, image_file
+            FROM persons
+            {where_clause}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            tuple(values + [limit, offset]),
+        )
+        rows = cursor.fetchall()
 
     return {
         "success": True,
@@ -1249,7 +1327,6 @@ def get_cases(
                 "police_station": r[6],
                 "tracing_status": r[7],
                 "image_file": r[8],
-                # "created_at": r[9] # if we want to return it
             }
             for r in rows
         ],
@@ -1259,16 +1336,16 @@ def get_cases(
 
 @app.get("/notifications")
 def get_notifications(current_user: Token = Depends(get_current_user)):
-    # User ID is current_user[0] because it's a tuple from fetchone
     user_id = current_user[0]
-    cursor.execute("""
-        SELECT id, title, message, type, is_read, to_char(created_at, 'YYYY-MM-DD HH24:MI')
-        FROM notifications
-        WHERE user_id = %s
-        ORDER BY created_at DESC
-    """, (user_id,))
-    rows = cursor.fetchall()
-    
+    with get_cursor() as cursor:
+        cursor.execute("""
+            SELECT id, title, message, type, is_read, to_char(created_at, 'YYYY-MM-DD HH24:MI')
+            FROM notifications
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+        """, (user_id,))
+        rows = cursor.fetchall()
+
     return {
         "success": True,
         "notifications": [
@@ -1287,11 +1364,11 @@ def get_notifications(current_user: Token = Depends(get_current_user)):
 @app.put("/notifications/{notification_id}/read")
 def mark_notification_read(notification_id: int, current_user: Token = Depends(get_current_user)):
     user_id = current_user[0]
-    cursor.execute(
-        "UPDATE notifications SET is_read = TRUE WHERE id = %s AND user_id = %s",
-        (notification_id, user_id)
-    )
-    conn.commit()
+    with get_cursor(commit=True) as cursor:
+        cursor.execute(
+            "UPDATE notifications SET is_read = TRUE WHERE id = %s AND user_id = %s",
+            (notification_id, user_id)
+        )
     return {"success": True}
 
 class CaseStatusUpdate(BaseModel):
@@ -1299,103 +1376,131 @@ class CaseStatusUpdate(BaseModel):
 
 @app.put("/cases/{case_id}/status")
 def update_case_status(
-    case_id: str, 
+    case_id: str,
     status_update: CaseStatusUpdate,
     current_user: Token = Depends(get_current_user)
 ):
-    # Verify police/admin role? For now assumed police dashboard uses it.
-    # Check role
-    role = current_user[6] 
+    role = current_user[6]
     if role not in ['police', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
 
     new_status = status_update.status
-    
-    # map frontend status to backend tracing_status if needed or store directly
-    # frontend: verified, rejected, match-confirmed
-    # backend: verified, closed, matched
-    
+
+    # A case can only become 'matched' through admin review of a pending
+    # potential match (/admin/matches/{id}/confirm). A request here to mark a
+    # match opens that review instead of changing the status directly.
+    if new_status in ('matched', 'match-confirmed'):
+        with get_cursor(commit=True) as cursor:
+            cursor.execute(
+                "SELECT name, image_file, tracing_status FROM persons WHERE final_person_id = %s",
+                (case_id,)
+            )
+            case_row = cursor.fetchone()
+            if not case_row:
+                raise HTTPException(status_code=404, detail="Case not found")
+            if case_row[2] in ('matched', 'closed'):
+                raise HTTPException(status_code=400, detail=f"Case is already {case_row[2]}")
+            cursor.execute(
+                "SELECT 1 FROM potential_matches WHERE case_id = %s AND status = 'pending' AND requested_by = %s",
+                (case_id, current_user[0])
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    """
+                    INSERT INTO potential_matches (case_id, submitted_image, status, requested_by)
+                    VALUES (%s, %s, 'pending', %s)
+                    """,
+                    (case_id, None, current_user[0])  # no new photo: police judgement
+                )
+                cursor.execute(
+                    "UPDATE persons SET tracing_status = 'under-review' WHERE final_person_id = %s",
+                    (case_id,)
+                )
+                add_timeline_event(
+                    cursor, case_id, "Match Review Requested",
+                    "Police requested admin confirmation of a match.", "under-review", current_user[0],
+                )
+                cursor.execute("SELECT id FROM users WHERE role = 'admin'")
+                for (admin_id,) in cursor.fetchall():
+                    cursor.execute(
+                        """
+                        INSERT INTO notifications (user_id, title, message, type)
+                        VALUES (%s, %s, %s, 'match')
+                        """,
+                        (admin_id, "Match Review Requested",
+                         f"Police requested confirmation of a match for {case_row[0]}.")
+                    )
+        return {"success": True, "pending_review": True,
+                "message": "Match submitted for admin confirmation."}
+
     db_status = new_status
     if new_status == 'rejected':
-         db_status = 'closed'
-    elif new_status == 'match-confirmed':
-         db_status = 'matched'
+        db_status = 'closed'
 
-    cursor.execute("SELECT reporter_id, name FROM persons WHERE final_person_id = %s", (case_id,))
-    case_row = cursor.fetchone()
-    if not case_row:
-        raise HTTPException(status_code=404, detail="Case not found")
-        
-    reporter_id = case_row[0]
-    person_name = case_row[1]
+    with get_cursor(commit=True) as cursor:
+        cursor.execute("SELECT reporter_id, name FROM persons WHERE final_person_id = %s", (case_id,))
+        case_row = cursor.fetchone()
+        if not case_row:
+            raise HTTPException(status_code=404, detail="Case not found")
 
-    cursor.execute(
-        "UPDATE persons SET tracing_status = %s WHERE final_person_id = %s",
-        (db_status, case_id)
-    )
-    
-    # Create Notification for Reporter
-    if reporter_id:
-        title = "Case Update"
-        message = f"Status updated to '{new_status}' for missing person: {person_name}"
-        notif_type = "update"
-        
-        if new_status == 'matched':
-            title = "Match Confirmed"
-            message = f"Great news! A match has been confirmed for {person_name}."
-            notif_type = "match"
-        elif new_status == 'rejected':
-            title = "Case Closed"
-            notif_type = "alert"
-            
+        reporter_id = case_row[0]
+        person_name = case_row[1]
+
         cursor.execute(
-            """
-            INSERT INTO notifications (user_id, title, message, type)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (reporter_id, title, message, notif_type)
+            "UPDATE persons SET tracing_status = %s WHERE final_person_id = %s",
+            (db_status, case_id)
         )
 
-    # Timeline Event
-    timeline_title = "Status Update"
-    timeline_desc = f"Case status updated to {new_status}."
-    if new_status == 'verified':
-        timeline_title = "Information Verified"
-        timeline_desc = "Case information has been verified by police."
-    elif new_status == 'rejected':
-        timeline_title = "Case Closed (Rejected)"
-        timeline_desc = "Case has been rejected and closed."
-    elif new_status == 'matched':
-        timeline_title = "Match Confirmed"
-        timeline_desc = "A match has been confirmed. Police are coordinating."
-    elif new_status == 'closed':
-        timeline_title = "Case Closed"
-        timeline_desc = "Case has been resolved and closed."
+        if reporter_id:
+            title = "Case Update"
+            message = f"Status updated to '{new_status}' for missing person: {person_name}"
+            notif_type = "update"
 
-    cursor.execute(
-        """
-        INSERT INTO case_timeline (case_id, title, description, status)
-        VALUES (%s, %s, %s, %s)
-        """,
-        (case_id, timeline_title, timeline_desc, db_status)
-    )
-    
-    conn.commit()
+            if new_status == 'rejected':
+                title = "Case Closed"
+                notif_type = "alert"
+
+            cursor.execute(
+                """
+                INSERT INTO notifications (user_id, title, message, type)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (reporter_id, title, message, notif_type)
+            )
+
+        timeline_title = "Status Update"
+        timeline_desc = f"Case status updated to {new_status}."
+        if new_status == 'verified':
+            timeline_title = "Information Verified"
+            timeline_desc = "Case information has been verified by police."
+        elif new_status == 'rejected':
+            timeline_title = "Case Closed (Rejected)"
+            timeline_desc = "Case has been rejected and closed."
+        elif new_status == 'closed':
+            timeline_title = "Case Closed"
+            timeline_desc = "Case has been resolved and closed."
+
+        add_timeline_event(cursor, case_id, timeline_title, timeline_desc, db_status, current_user[0])
+
     return {"success": True}
 
 @app.get("/cases/{case_id}/timeline")
 def get_case_timeline(case_id: str):
-    cursor.execute(
-        """
-        SELECT title, description, status, to_char(event_date, 'DD Mon YYYY, HH:MI AM')
-        FROM case_timeline
-        WHERE case_id = %s
-        ORDER BY event_date DESC
-        """,
-        (case_id,)
-    )
-    rows = cursor.fetchall()
-    
+    with get_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT t.title, t.description, t.status,
+                   to_char(t.event_date, 'DD Mon YYYY, HH:MI AM'),
+                   u.role, TRIM(CONCAT(u.first_name, ' ', u.last_name))
+            FROM case_timeline t
+            LEFT JOIN users u ON u.id = t.actor_id
+            WHERE t.case_id = %s
+            ORDER BY t.event_date DESC
+            """,
+            (case_id,)
+        )
+        rows = cursor.fetchall()
+
     return {
         "success": True,
         "timeline": [
@@ -1403,7 +1508,10 @@ def get_case_timeline(case_id: str):
                 "title": r[0],
                 "description": r[1],
                 "status": r[2],
-                "date": r[3]
+                "date": r[3],
+                # Citizens are shown by role only; police/admin by name for accountability
+                "actor_role": r[4],
+                "actor_name": r[5] if r[4] in ('police', 'admin') else None,
             }
             for r in rows
         ]

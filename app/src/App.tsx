@@ -31,8 +31,16 @@ function App() {
         <Route path="/cases" element={<Cases />} />
         <Route path="/cases/:id" element={<CaseDetails />} />
         <Route path="/how-it-works" element={<HowItWorks />} />
-        <Route path="/search" element={<SearchPerson />} />
-        <Route path="/search-scene" element={<SceneSearch />} />
+        <Route path="/search" element={
+          <ProtectedRoute allowedRoles={['citizen', 'police', 'admin']}>
+            <SearchPerson />
+          </ProtectedRoute>
+        } />
+        <Route path="/search-scene" element={
+          <ProtectedRoute allowedRoles={['citizen', 'police', 'admin']}>
+            <SceneSearch />
+          </ProtectedRoute>
+        } />
         <Route path="/report" element={<ReportMissing />} />
         <Route path="/track" element={<TrackCase />} />
         <Route path="/login" element={<Login />} />
